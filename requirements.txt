@@ -1,0 +1,30 @@
+
+# requirements.txt (updated)
+
+# Core dependencies
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+
+# Database
+psycopg2-binary>=2.9.9
+pgvector>=0.2.4
+
+# Audio/Video processing
+whisperx>=3.1.1
+torch>=2.1.0
+torchaudio>=2.1.0
+pyannote.audio>=3.1.0
+faster-whisper>=0.10.0
+
+# LLM and Embeddings (Google GenAI SDK)
+google-genai>=1.46.0
+
+# Utilities
+tqdm>=4.66.0
+numpy>=1.24.0
+
+# Optional (for VLM if enabled)
+#transformers>=4.36.0
+#Pillow>=10.1.0
+#opencv-python>=4.8.0

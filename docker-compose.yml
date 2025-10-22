@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: vidpalai_postgres
+    environment:
+      POSTGRES_USER: vidpalai
+      POSTGRES_PASSWORD: vidpalai_secure_2025
+      POSTGRES_DB: vidpalai
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vidpalai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
