@@ -40,6 +40,7 @@ class LLMRefiner:
         base_edl: List[Dict[str, Any]],
         transcript: List[Dict[str, Any]],
         role_mapping: Dict[str, str],
+        vlm_descriptions: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Optionally refine EDL using LLM for nuanced decisions.
@@ -78,6 +79,7 @@ class LLMRefiner:
                 end_time,
                 transcript,
                 role_mapping,
+                vlm_descriptions,
             )
             
             # Build prompt
@@ -112,6 +114,7 @@ class LLMRefiner:
         end_time: float,
         transcript: List[Dict[str, Any]],
         role_mapping: Dict[str, str],
+        vlm_descriptions: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Build context for LLM including RAG retrieval."""
         # Extract transcript segment
@@ -163,48 +166,106 @@ class LLMRefiner:
                     }
                     for c in rag_chunks
                 ]
+                
+        if vlm_descriptions and self.rag_store:
+            vlm_context = self.rag_store.retrieve_vlm_context(
+                episode_id=episode_id,
+                start_time=start_time,
+                end_time=end_time,
+                top_k=5,
+            )
+            if vlm_context:
+                context["visual_descriptions"] = [
+                    {
+                        "time": f"{v['time_seconds']:.1f}s",
+                        "camera": v['camera_id'],
+                        "description": v['description'],
+                    }
+                    for v in vlm_context
+                ]
         
         return context
     
     def _build_refinement_prompt(
-        self,
-        cuts: List[Dict[str, Any]],
-        context: Dict[str, Any],
-        role_mapping: Dict[str, str],
+    self,
+    cuts: List[Dict[str, Any]],
+    context: Dict[str, Any],
+    role_mapping: Dict[str, str],
     ) -> str:
-        """Build prompt for LLM refinement."""
-        reverse_mapping = {v: k for k, v in role_mapping.items()}
+        """Build prompt for LLM refinement optimized for long-form conversational content."""
         
-        prompt = f"""You are an expert video editor reviewing camera cuts for a multi-camera conversation.
+        vlm_section = ""
+        if context.get("visual_descriptions"):
+            vlm_section = "\n**Visual Context:**\n"
+            for vd in context["visual_descriptions"]:
+                vlm_section += f"- {vd['time']} [{vd['camera']}]: {vd['description']}\n"
+        
+        prompt = f"""You are an expert video editor specializing in long-form conversational content (podcasts, interviews, panel discussions).
 
-**Context:**
-Time: {context['start_time']:.1f}s - {context['end_time']:.1f}s
+        **Context:**
+        Time: {context['start_time']:.1f}s - {context['end_time']:.1f}s
 
-**Transcript:**
-{context['transcript']}
+        **Transcript:**
+        {context['transcript']}
+        
+        **VLM description**
+        {vlm_section}
+        
+        **Current Cuts (rule-based):**
+        {json.dumps(cuts, indent=2)}
 
-**Current Cuts (rule-based):**
-{json.dumps(cuts, indent=2)}
+        **Your Task:**
+        Review the cuts and make MINIMAL adjustments to improve flow and viewer engagement for long-form conversational content.
 
-**Your Task:**
-Review the cuts and make minor adjustments if needed for:
-1. Better pacing and flow
-2. Capturing important reactions
-3. Avoiding jarring cuts during key moments
-4. Maintaining visual interest
+        **Critical Guidelines for Long-Form Content:**
 
-**Rules:**
-- Keep most cuts unchanged if they're good
-- Minimum shot duration: 2.0 seconds
-- Available cameras: cam_host, cam_guest, cam_wide
-- Preserve timing accuracy (round to 0.033s for 30fps)
+        1. **Prioritize Continuity Over Action**
+        - Avoid quick cuts (minimum 3-4 seconds per shot)
+        - Longer shots (5-15 seconds) are PREFERRED for conversations
+        - Only cut when there's a meaningful reason (speaker change, reaction, emphasis)
 
-Respond with JSON only:
-{{
-  "cuts": [
-    {{"start_time": 0.0, "end_time": 2.5, "camera_id": "cam_host", "reason": "speaker"}},
-    ...
-  ]
-}}"""
+        2. **Respect Conversational Flow**
+        - DO NOT interrupt mid-sentence or mid-thought
+        - Let speakers finish complete ideas before cutting
+        - Avoid cutting during natural pauses where tension is building
+
+        3. **Minimal Camera Movement**
+        - Use wide shots for multi-person exchanges or when establishing context
+        - Use speaker close-ups for extended monologues or key points
+        - Reserve reaction shots for truly significant moments only
+
+        4. **Shot Duration Guidelines**
+        - Minimum: 3.0 seconds (previously 2.0s)
+        - Preferred: 5-15 seconds for conversational content
+        - Acceptable longer: 20-30+ seconds for engaging stories or explanations
+
+        5. **When to Cut:**
+        - ✅ Natural speaker changes (only if the new speaker talks for 5+ seconds)
+        - ✅ Clear topic transitions
+        - ✅ Significant reactions (laughter, surprise, disagreement)
+        - ❌ Mid-sentence
+        - ❌ During thinking pauses
+        - ❌ Just for visual variety
+
+        6. **Camera Selection:**
+        - Host speaking for 10+ seconds → cam_host
+        - Guest speaking for 10+ seconds → cam_guest
+        - Back-and-forth exchange (< 5s turns) → cam_wide
+        - Story/explanation (30+ seconds) → stay on speaker
+
+        **Output Requirements:**
+        - Keep 70-80% of the original cuts unchanged
+        - Only adjust timing/camera if there's clear improvement
+        - Merge short cuts into longer ones when possible
+        - Ensure NO GAPS between cuts (each cut must start exactly where the previous ended)
+        - Round all times to 0.033s (30fps frame boundaries)
+
+        Respond with JSON only:
+        {{
+        "cuts": [
+            {{"start_time": 0.0, "end_time": 5.0, "camera_id": "cam_host", "reason": "host opening statement"}},
+            ...
+        ]
+        }}"""
         
         return prompt

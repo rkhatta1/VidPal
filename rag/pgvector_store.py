@@ -1,4 +1,4 @@
-# rag/pgvector_store.py
+# rag/pgvector_store.py (COMPLETE FIXED VERSION)
 import logging
 from typing import List, Dict, Any, Optional
 import numpy as np
@@ -30,7 +30,7 @@ class PGVectorRAGStore:
                 api_key=settings.GOOGLE_API_KEY,
             )
         
-        # Use gemini-embedding-001 (3072 dimensions by default)
+        # Use gemini-embedding-001 (768 dimensions by default)
         self.embedding_model = settings.EMBEDDING_MODEL
         self.embedding_dim = settings.EMBEDDING_DIM
         
@@ -52,7 +52,7 @@ class PGVectorRAGStore:
             task_type: RETRIEVAL_DOCUMENT or RETRIEVAL_QUERY
         
         Returns:
-            List of embedding vectors
+            List of embedding vectors as Python lists of plain floats
         """
         # Gemini embedding API has a limit of 250 texts per request
         batch_size = 250
@@ -71,11 +71,34 @@ class PGVectorRAGStore:
                     ),
                 )
                 
-                # Extract embeddings
-                batch_embeddings = [
-                    emb.values for emb in response.embeddings
-                ]
-                all_embeddings.extend(batch_embeddings)
+                # Extract embeddings and convert to plain Python lists of floats
+                for emb in response.embeddings:
+                    # Get the values - they might be various types
+                    values = emb.values
+                    
+                    # Convert to plain Python list of plain Python floats
+                    if isinstance(values, np.ndarray):
+                        # NumPy array - convert to list
+                        embedding_list = [float(v) for v in values.flatten()]
+                    elif isinstance(values, (list, tuple)):
+                        # Already a list/tuple - ensure all elements are plain floats
+                        embedding_list = [float(v) for v in values]
+                    elif hasattr(values, 'tolist'):
+                        # Has tolist method (like numpy)
+                        temp_list = values.tolist()
+                        embedding_list = [float(v) for v in temp_list]
+                    else:
+                        # Last resort: iterate and convert
+                        embedding_list = [float(v) for v in values]
+                    
+                    # Verify dimension
+                    if len(embedding_list) != self.embedding_dim:
+                        logger.warning(
+                            f"Embedding dimension mismatch: "
+                            f"expected {self.embedding_dim}, got {len(embedding_list)}"
+                        )
+                    
+                    all_embeddings.append(embedding_list)
                 
             except Exception as e:
                 logger.error(f"Embedding generation failed for batch {i}: {e}")
@@ -86,6 +109,8 @@ class PGVectorRAGStore:
         
         return all_embeddings
     
+    # rag/pgvector_store.py (corrected ingest_transcript_chunks method)
+
     def ingest_transcript_chunks(
         self,
         episode_id: str,
@@ -118,6 +143,11 @@ class PGVectorRAGStore:
         logger.info(f"Generating embeddings for {len(texts)} chunks...")
         embeddings = self._generate_embeddings(texts, task_type="RETRIEVAL_DOCUMENT")
         
+        # Verify embeddings
+        if len(embeddings) != len(chunks):
+            logger.error(f"Embedding count mismatch: {len(embeddings)} vs {len(chunks)}")
+            return
+        
         # Insert into database
         with db.get_cursor() as cursor:
             # Delete existing chunks for this episode
@@ -128,25 +158,42 @@ class PGVectorRAGStore:
             
             # Insert new chunks
             for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                cursor.execute(
-                    """
-                    INSERT INTO transcript_chunks 
-                    (episode_id, chunk_id, start_time, end_time, speaker, text, embedding, metadata)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        episode_id,
-                        i,
-                        chunk['start_time'],
-                        chunk['end_time'],
-                        chunk.get('speaker', 'unknown'),
-                        chunk['text'],
-                        embedding,
-                        None,
+                # Ensure embedding is a list of plain Python floats
+                if not isinstance(embedding, list):
+                    embedding = list(embedding)
+                
+                # Convert all values to plain Python floats (strip numpy types)
+                embedding = [float(v) for v in embedding]
+                
+                # Convert to pgvector format: [val1,val2,val3,...]
+                # IMPORTANT: Use square brackets, not curly braces!
+                embedding_str = '[' + ','.join(str(v) for v in embedding) + ']'
+                
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO transcript_chunks 
+                        (episode_id, chunk_id, start_time, end_time, speaker, text, embedding, metadata)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s::vector, %s)
+                        """,
+                        (
+                            episode_id,
+                            i,
+                            chunk['start_time'],
+                            chunk['end_time'],
+                            chunk.get('speaker', 'unknown'),
+                            chunk['text'],
+                            embedding_str,  # Use square bracket format
+                            None,
+                        )
                     )
-                )
+                except Exception as e:
+                    logger.error(f"Failed to insert chunk {i}: {e}")
+                    logger.error(f"Embedding sample: {embedding[:5]}")
+                    raise
         
         logger.info(f"✅ Ingested {len(chunks)} chunks with Gemini embeddings")
+
     
     def _build_chunks(
         self,
@@ -189,11 +236,114 @@ class PGVectorRAGStore:
         
         return chunks
     
-    def retrieve(
+    def ingest_vlm_descriptions(
         self,
-        query: str,
-        top_k: int = 3,
-        episode_id: Optional[str] = None,
+        episode_id: str,
+        vlm_descriptions: List[Dict[str, Any]],
+    ) -> None:
+        """
+        Ingest VLM descriptions with embeddings into the database.
+        
+        Args:
+            episode_id: Unique identifier for this episode
+            vlm_descriptions: List of VLM description dictionaries
+        """
+        if not vlm_descriptions:
+            logger.warning("Empty VLM descriptions provided")
+            return
+        
+        logger.info(f"Ingesting {len(vlm_descriptions)} VLM descriptions for episode {episode_id}")
+        
+        # Generate embeddings for all descriptions
+        texts = [desc['description'] for desc in vlm_descriptions]
+        logger.info(f"Generating embeddings for {len(texts)} VLM descriptions...")
+        embeddings = self._generate_embeddings(texts, task_type="RETRIEVAL_DOCUMENT")
+        
+        # Insert into database
+        with db.get_cursor() as cursor:
+            # Delete existing VLM descriptions for this episode
+            cursor.execute(
+                "DELETE FROM vlm_descriptions WHERE episode_id = %s",
+                (episode_id,)
+            )
+            
+            # Insert new descriptions
+            for desc, embedding in zip(vlm_descriptions, embeddings):
+                # Ensure embedding is a list of plain Python floats
+                embedding = [float(v) for v in embedding]
+                
+                # Convert to pgvector format
+                embedding_str = '[' + ','.join(str(v) for v in embedding) + ']'
+                
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO vlm_descriptions 
+                        (episode_id, camera_id, time_seconds, transition_time, 
+                         offset_seconds, description, embedding)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
+                        """,
+                        (
+                            episode_id,
+                            desc['camera_id'],
+                            desc['time'],
+                            desc['transition_time'],
+                            desc['offset'],
+                            desc['description'],
+                            embedding_str,
+                        )
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to insert VLM description: {e}")
+                    raise
+        
+        logger.info(f"✅ Ingested {len(vlm_descriptions)} VLM descriptions")
+    
+    def retrieve_vlm_context(
+        self,
+        episode_id: str,
+        start_time: float,
+        end_time: float,
+        top_k: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve VLM descriptions within a time range.
+        
+        Args:
+            episode_id: Episode identifier
+            start_time: Start time in seconds
+            end_time: End time in seconds
+            top_k: Maximum number of results
+        
+        Returns:
+            List of VLM descriptions with metadata
+        """
+        sql = """
+            SELECT 
+                camera_id,
+                time_seconds,
+                transition_time,
+                offset_seconds,
+                description
+            FROM vlm_descriptions
+            WHERE episode_id = %s
+              AND time_seconds >= %s
+              AND time_seconds <= %s
+            ORDER BY time_seconds
+            LIMIT %s
+        """
+        
+        with db.get_cursor() as cursor:
+            cursor.execute(sql, (episode_id, start_time, end_time, top_k))
+            results = cursor.fetchall()
+        
+        return [dict(row) for row in results]
+    
+    def retrieve(
+    self,
+    query: str,
+    top_k: int = 3,
+    episode_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Retrieve relevant context chunks using vector similarity.
@@ -216,6 +366,12 @@ class PGVectorRAGStore:
         
         query_embedding = query_embeddings[0]
         
+        # Ensure plain floats
+        query_embedding = [float(v) for v in query_embedding]
+        
+        # Convert to pgvector format: [val1,val2,val3,...]
+        embedding_str = '[' + ','.join(str(v) for v in query_embedding) + ']'
+        
         # Build SQL query with cosine similarity
         sql = """
             SELECT 
@@ -228,14 +384,14 @@ class PGVectorRAGStore:
             FROM transcript_chunks
         """
         
-        params = [query_embedding]
+        params = [embedding_str]
         
         if episode_id:
             sql += " WHERE episode_id = %s"
             params.append(episode_id)
         
         sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
-        params.extend([query_embedding, top_k])
+        params.extend([embedding_str, top_k])
         
         # Execute query
         with db.get_cursor() as cursor:
@@ -255,6 +411,7 @@ class PGVectorRAGStore:
             })
         
         return chunks
+
     
     def clear_episode(self, episode_id: str) -> None:
         """Clear all chunks for a specific episode."""

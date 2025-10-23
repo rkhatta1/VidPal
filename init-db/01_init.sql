@@ -73,7 +73,7 @@ CREATE TABLE edl_cuts (
     start_time FLOAT NOT NULL,
     end_time FLOAT NOT NULL,
     camera_id VARCHAR(100) NOT NULL,
-    reason VARCHAR(100),  -- speaker, reaction, rapid_exchange, opening, etc.
+    reason TEXT,  -- speaker, reaction, rapid_exchange, opening, etc.
     sequence_order INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     metadata JSONB
@@ -118,6 +118,25 @@ CREATE INDEX idx_transcript_chunks_embedding ON transcript_chunks
     USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
 
+-- ========== VLM Descriptions Table ==========
+CREATE TABLE vlm_descriptions (
+    id SERIAL PRIMARY KEY,
+    episode_id VARCHAR(255) REFERENCES episodes(episode_id) ON DELETE CASCADE,
+    camera_id VARCHAR(100) NOT NULL,
+    time_seconds FLOAT NOT NULL,
+    transition_time FLOAT,
+    offset_seconds FLOAT,
+    description TEXT NOT NULL,
+    embedding vector(768),  -- Gemini embedding of description
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    metadata JSONB
+);
+
+CREATE INDEX idx_vlm_descriptions_episode ON vlm_descriptions(episode_id);
+CREATE INDEX idx_vlm_descriptions_time ON vlm_descriptions(episode_id, time_seconds);
+CREATE INDEX idx_vlm_descriptions_embedding ON vlm_descriptions 
+    USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
 
 -- ========== Utility Functions ==========
 

@@ -39,6 +39,49 @@ class RuleBasedEDLGenerator:
         self.rapid_window_s = rapid_window_s
         self.rapid_changes = rapid_changes
         self.reaction_keywords = reaction_keywords or []
+        
+    def _eliminate_gaps(
+        self,
+        cuts: List[Cut],
+        start: float,
+        end: float,
+    ) -> List[Cut]:
+        """
+        Eliminate gaps between cuts by extending clips to touch each other.
+        Ensures continuous timeline with no blank frames.
+        """
+        if not cuts:
+            return cuts
+        
+        result = []
+        
+        for i, cut in enumerate(cuts):
+            if i == 0:
+                # First cut - ensure it starts at timeline start
+                cut.start_time = start
+            else:
+                # Subsequent cuts - start exactly where previous cut ended
+                cut.start_time = result[-1].end_time
+            
+            if i == len(cuts) - 1:
+                # Last cut - extend to end of timeline
+                cut.end_time = end
+            else:
+                # Check for gap with next cut
+                next_cut = cuts[i + 1]
+                if cut.end_time < next_cut.start_time:
+                    # Gap detected - extend this cut to touch next one
+                    gap_size = next_cut.start_time - cut.end_time
+                    if gap_size <= 0.5:  # Small gap - extend current cut
+                        cut.end_time = next_cut.start_time
+                    else:
+                        # Large gap - could be intentional, but still fill it
+                        logger.warning(f"Large gap detected: {gap_size:.2f}s at {cut.end_time:.1f}s")
+                        cut.end_time = next_cut.start_time
+            
+            result.append(cut)
+        
+        return result
     
     def generate_edl(
         self,
@@ -87,7 +130,10 @@ class RuleBasedEDLGenerator:
         # Step 6: Enforce minimum shot duration
         merged = self._enforce_min_duration(merged, start_time, end_time)
         
-        # Step 7: Round to frames and validate
+        # Step 7: Eliminate gaps (NEW)
+        merged = self._eliminate_gaps(merged, start_time, end_time)
+        
+        # Step 8: Round to frames and validate
         final = self._round_and_validate(merged, start_time, end_time)
         
         logger.info(f"✅ Generated {len(final)} cuts")

@@ -18,6 +18,8 @@ from processing.audio_transcription import AudioTranscriber
 from edl.rules import RuleBasedEDLGenerator
 from processing.llm_refiner import LLMRefiner
 from fcpxml.generator import FCPXMLGenerator
+from processing.vlm_processor import VLMProcessor
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +53,11 @@ class VidPalAIPipeline:
             self.llm_refiner = LLMRefiner(rag_store=self.rag_store)
         else:
             self.llm_refiner = None
+            
+        if self.settings.ENABLE_VLM_PROCESSING:
+            self.vlm_processor = VLMProcessor()
+        else:
+            self.vlm_processor = None
         
         self.fcpxml_generator = FCPXMLGenerator()
         
@@ -133,10 +140,10 @@ class VidPalAIPipeline:
             
             logger.info(f"✅ Phase 1 completed in {time.time() - phase_start:.1f}s")
             
-            # ===== PHASE 2: RAG Ingestion (Optional) =====
+            # ===== PHASE 2: RAG Ingestion (Transcript) =====
             if self.rag_store:
                 logger.info("\n" + "="*60)
-                logger.info("PHASE 2: RAG Ingestion")
+                logger.info("PHASE 2: RAG Ingestion (Transcript)")
                 logger.info("="*60)
                 
                 phase_start = time.time()
@@ -149,14 +156,13 @@ class VidPalAIPipeline:
                 
                 logger.info(f"✅ Phase 2 completed in {time.time() - phase_start:.1f}s")
             
-            # ===== PHASE 3: EDL Generation =====
+            # ===== PHASE 3: EDL Generation (Rule-Based) =====
             logger.info("\n" + "="*60)
-            logger.info("PHASE 3: EDL Generation")
+            logger.info("PHASE 3: EDL Generation (Rule-Based)")
             logger.info("="*60)
             
             phase_start = time.time()
             
-            # Generate rule-based EDL
             edl_result = self.edl_generator.generate_edl(
                 speaker_segments=speaker_segments,
                 role_mapping=role_mapping,
@@ -168,23 +174,56 @@ class VidPalAIPipeline:
             cuts = edl_result["cuts"]
             logger.info(f"Generated {len(cuts)} rule-based cuts")
             
-            # Optional LLM refinement
+            logger.info(f"✅ Phase 3 completed in {time.time() - phase_start:.1f}s")
+            
+            # ===== PHASE 4: VLM Processing (Optional) =====
+            vlm_descriptions = []
+            if self.vlm_processor:
+                logger.info("\n" + "="*60)
+                logger.info("PHASE 4: VLM Scene Analysis")
+                logger.info("="*60)
+                
+                phase_start = time.time()
+                
+                vlm_descriptions = self.vlm_processor.process_scene_transitions(
+                    video_paths=video_paths,
+                    cuts=cuts,
+                    episode_id=episode_id,
+                )
+                
+                # Store VLM descriptions in RAG
+                if self.rag_store and vlm_descriptions:
+                    self.rag_store.ingest_vlm_descriptions(
+                        episode_id=episode_id,
+                        vlm_descriptions=vlm_descriptions,
+                    )
+                
+                logger.info(f"✅ Phase 4 completed in {time.time() - phase_start:.1f}s")
+            
+            # ===== PHASE 5: LLM Refinement (Optional) =====
             if self.llm_refiner:
+                logger.info("\n" + "="*60)
+                logger.info("PHASE 5: LLM EDL Refinement")
+                logger.info("="*60)
+                
+                phase_start = time.time()
+                
                 cuts = self.llm_refiner.refine_edl(
                     episode_id=episode_id,
                     base_edl=cuts,
                     transcript=transcript,
                     role_mapping=role_mapping,
+                    vlm_descriptions=vlm_descriptions,  # Pass VLM context
                 )
+                
+                logger.info(f"✅ Phase 5 completed in {time.time() - phase_start:.1f}s")
             
-            # Save EDL to database
+            # Save final EDL to database
             EpisodeRepository.save_edl_cuts(episode_id, cuts)
             
-            logger.info(f"✅ Phase 3 completed in {time.time() - phase_start:.1f}s")
-            
-            # ===== PHASE 4: FCPXML Generation =====
+            # ===== PHASE 6: FCPXML Generation =====
             logger.info("\n" + "="*60)
-            logger.info("PHASE 4: FCPXML Generation")
+            logger.info("PHASE 6: FCPXML Generation")
             logger.info("="*60)
             
             phase_start = time.time()
@@ -195,9 +234,10 @@ class VidPalAIPipeline:
                 video_paths=video_paths,
                 output_path=output_path,
                 episode_id=episode_id,
+                master_audio_path=audio_path,
             )
             
-            logger.info(f"✅ Phase 4 completed in {time.time() - phase_start:.1f}s")
+            logger.info(f"✅ Phase 6 completed in {time.time() - phase_start:.1f}s")
             
             # Update status
             EpisodeRepository.update_status(episode_id, "completed")

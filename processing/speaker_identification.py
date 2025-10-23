@@ -1,10 +1,17 @@
-
-# processing/speaker_identification.py
+# processing/speaker_identification.py (complete with GCS support)
 import logging
 from typing import List, Dict, Any, Tuple, Optional
 import whisperx
 import torch
 from collections import defaultdict
+from pathlib import Path
+import tempfile
+import subprocess
+import os
+import uuid
+from google.cloud import speech_v1p1beta1 as speech
+from google.cloud import storage
+from google.api_core import client_options
 from config import get_settings
 from db.models import EpisodeRepository
 from utils.caching import Cache, compute_file_hash
@@ -13,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class SpeakerIdentifier:
-    """Optimized speaker identification with WhisperX."""
+    """Speaker identification using Google Cloud Speech-to-Text for diarization."""
     
     def __init__(self, cache: Optional[Cache] = None):
         self.settings = get_settings()
@@ -21,7 +28,23 @@ class SpeakerIdentifier:
         self.device = "cuda" if (torch.cuda.is_available() and self.settings.USE_GPU) else "cpu"
         self.compute_type = "float16" if self.device == "cuda" else "int8"
         
+        # Initialize Google Cloud Speech client with explicit quota project
+        client_opts = client_options.ClientOptions(
+            quota_project_id=self.settings.GOOGLE_CLOUD_PROJECT
+        )
+        
+        self.speech_client = speech.SpeechClient(
+            client_options=client_opts
+        )
+        
+        # Initialize Google Cloud Storage client
+        self.storage_client = storage.Client(
+            project=self.settings.GOOGLE_CLOUD_PROJECT
+        )
+        
         logger.info(f"Speaker identifier initialized (device: {self.device})")
+        logger.info(f"Using Google Cloud Speech-to-Text for diarization")
+        logger.info(f"Project: {self.settings.GOOGLE_CLOUD_PROJECT}")
     
     def identify_speakers(
         self,
@@ -50,80 +73,23 @@ class SpeakerIdentifier:
         
         logger.info(f"Starting speaker identification (device: {self.device})")
         
-        # Load models
-        logger.info("Loading WhisperX model...")
-        model = whisperx.load_model(
-            self.settings.WHISPER_MODEL,
-            self.device,
-            compute_type=self.compute_type
+        # Convert audio to proper format for Google Cloud Speech
+        processed_audio_path = self._prepare_audio_for_gcs(audio_path, duration_limit_seconds)
+        
+        # Upload to GCS and get URI
+        gcs_uri = self._upload_to_gcs(processed_audio_path, episode_id)
+        
+        # Perform diarization with Google Cloud Speech-to-Text
+        logger.info("Performing speaker diarization with Google Cloud Speech-to-Text...")
+        diarization_result = self._diarize_with_google_speech(
+            gcs_uri,
+            expected_speakers,
+            min_speakers,
+            max_speakers,
         )
         
-        # Load and transcribe audio
-        logger.info("Transcribing audio...")
-        audio = whisperx.load_audio(audio_path)
-        
-        # Truncate if needed
-        if duration_limit_seconds:
-            sample_rate = 16000
-            audio = audio[:int(duration_limit_seconds * sample_rate)]
-        
-        result = model.transcribe(
-            audio,
-            batch_size=self.settings.WHISPERX_BATCH_SIZE
-        )
-        
-        logger.info(f"Detected language: {result['language']}")
-        
-        # Align
-        logger.info("Aligning transcription...")
-        model_a, metadata = whisperx.load_align_model(
-            language_code=result["language"],
-            device=self.device
-        )
-        
-        result = whisperx.align(
-            result["segments"],
-            model_a,
-            metadata,
-            audio,
-            self.device,
-            return_char_alignments=False,
-        )
-        
-        # Diarization
-        logger.info("Performing speaker diarization...")
-        try:
-            diarize_model = whisperx.DiarizationPipeline(
-                use_auth_token=self.settings.HUGGINGFACE_TOKEN,
-                device=self.device
-            )
-            
-            # Configure diarization parameters
-            diarize_kwargs = {}
-            if expected_speakers is not None:
-                diarize_kwargs['num_speakers'] = expected_speakers
-            else:
-                diarize_kwargs['min_speakers'] = min_speakers
-                diarize_kwargs['max_speakers'] = max_speakers
-            
-            diarize_segments = diarize_model(audio, **diarize_kwargs)
-            assigned = whisperx.assign_word_speakers(diarize_segments, result)
-            
-        except Exception as e:
-            logger.warning(f"Diarization failed: {e}, using transcription only")
-            assigned = result
-        
-        # Extract speaker segments
-        speaker_segments = []
-        for seg in assigned.get("segments", []):
-            speaker_id = seg.get("speaker", "SPEAKER_00")
-            speaker_segments.append({
-                "speaker_id": speaker_id,
-                "start": seg["start"],
-                "end": seg["end"],
-                "text": seg.get("text", ""),
-                "confidence": seg.get("confidence", None),
-            })
+        # Extract speaker segments from diarization
+        speaker_segments = self._extract_speaker_segments(diarization_result)
         
         # Create role mapping
         role_mapping = self._create_role_mapping(speaker_segments)
@@ -145,7 +111,223 @@ class SpeakerIdentifier:
         speaker_stats = self._calculate_speaker_stats(speaker_segments)
         EpisodeRepository.save_speakers(episode_id, role_mapping, speaker_stats)
         
+        # Cleanup temp file and GCS file
+        if processed_audio_path != audio_path:
+            Path(processed_audio_path).unlink(missing_ok=True)
+        
+        self._cleanup_gcs_file(gcs_uri)
+        
         return speaker_segments, role_mapping
+    
+    def _prepare_audio_for_gcs(
+        self,
+        audio_path: str,
+        duration_limit_seconds: Optional[int] = None,
+    ) -> str:
+        """
+        Prepare audio file for Google Cloud Speech-to-Text.
+        Converts to LINEAR16 WAV format (mono, 16kHz).
+        """
+        logger.info("Preparing audio for Google Cloud Speech-to-Text...")
+        
+        # Create temp file
+        temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        temp_wav_path = temp_wav.name
+        temp_wav.close()
+        
+        # Build ffmpeg command
+        cmd = [
+            'ffmpeg',
+            '-i', audio_path,
+            '-ar', '16000',  # 16kHz sample rate
+            '-ac', '1',      # Mono
+            '-acodec', 'pcm_s16le',  # LINEAR16 encoding
+        ]
+        
+        # Add duration limit if specified
+        if duration_limit_seconds:
+            cmd.extend(['-t', str(duration_limit_seconds)])
+        
+        cmd.extend(['-y', temp_wav_path])
+        
+        try:
+            subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            logger.info(f"Audio converted to LINEAR16 WAV: {temp_wav_path}")
+            return temp_wav_path
+        
+        except subprocess.CalledProcessError as e:
+            logger.error(f"FFmpeg conversion failed: {e.stderr}")
+            raise
+    
+    def _upload_to_gcs(self, audio_path: str, episode_id: str) -> str:
+        """
+        Upload audio file to Google Cloud Storage.
+        
+        Returns:
+            GCS URI (gs://bucket-name/path/to/file.wav)
+        """
+        bucket_name = self.settings.GCS_BUCKET_NAME
+        
+        # Create bucket if it doesn't exist
+        try:
+            bucket = self.storage_client.bucket(bucket_name)
+            if not bucket.exists():
+                logger.info(f"Creating GCS bucket: {bucket_name}")
+                bucket = self.storage_client.create_bucket(
+                    bucket_name,
+                    location=self.settings.GOOGLE_CLOUD_LOCATION
+                )
+        except Exception as e:
+            logger.error(f"Failed to access/create bucket: {e}")
+            raise
+        
+        # Generate unique blob name
+        blob_name = f"vidpalai/diarization/{episode_id}/{uuid.uuid4().hex}.wav"
+        blob = bucket.blob(blob_name)
+        
+        # Upload file
+        logger.info(f"Uploading audio to GCS: gs://{bucket_name}/{blob_name}")
+        blob.upload_from_filename(audio_path)
+        
+        gcs_uri = f"gs://{bucket_name}/{blob_name}"
+        logger.info(f"✅ Audio uploaded to: {gcs_uri}")
+        
+        return gcs_uri
+    
+    def _cleanup_gcs_file(self, gcs_uri: str) -> None:
+        """Delete temporary file from GCS."""
+        try:
+            # Parse GCS URI
+            if not gcs_uri.startswith("gs://"):
+                return
+            
+            path_parts = gcs_uri[5:].split("/", 1)
+            bucket_name = path_parts[0]
+            blob_name = path_parts[1]
+            
+            # Delete blob
+            bucket = self.storage_client.bucket(bucket_name)
+            blob = bucket.blob(blob_name)
+            blob.delete()
+            
+            logger.info(f"Cleaned up GCS file: {gcs_uri}")
+        except Exception as e:
+            logger.warning(f"Failed to cleanup GCS file: {e}")
+    
+    def _diarize_with_google_speech(
+        self,
+        gcs_uri: str,
+        expected_speakers: Optional[int],
+        min_speakers: int,
+        max_speakers: int,
+    ) -> speech.LongRunningRecognizeResponse:
+        """
+        Perform speaker diarization using Google Cloud Speech-to-Text.
+        """
+        # Configure diarization
+        diarization_config = speech.SpeakerDiarizationConfig(
+            enable_speaker_diarization=True,
+            min_speaker_count=expected_speakers or min_speakers,
+            max_speaker_count=expected_speakers or max_speakers,
+        )
+        
+        # Configure recognition
+        config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=16000,
+            language_code=self.settings.SPEECH_LANGUAGE_CODE,
+            diarization_config=diarization_config,
+            enable_automatic_punctuation=True,
+            enable_word_time_offsets=True,
+            model=self.settings.SPEECH_MODEL,
+        )
+        
+        # Create audio object with GCS URI
+        audio = speech.RecognitionAudio(uri=gcs_uri)
+        
+        # Use long-running recognize
+        logger.info("Starting Google Cloud Speech-to-Text recognition...")
+        logger.info("This may take a few minutes for longer audio files...")
+        
+        operation = self.speech_client.long_running_recognize(
+            config=config,
+            audio=audio
+        )
+        
+        logger.info("Waiting for operation to complete...")
+        response = operation.result(timeout=600)  # 10 minute timeout
+        
+        logger.info("✅ Google Cloud Speech-to-Text diarization complete")
+        return response
+    
+    def _extract_speaker_segments(
+        self,
+        response: speech.LongRunningRecognizeResponse,
+    ) -> List[Dict[str, Any]]:
+        """
+        Extract speaker segments from Google Cloud Speech response.
+        """
+        if not response.results:
+            logger.warning("No results from Speech-to-Text")
+            return []
+        
+        # The last result contains all words with speaker tags
+        result = response.results[-1]
+        
+        if not result.alternatives:
+            logger.warning("No alternatives in final result")
+            return []
+        
+        alternative = result.alternatives[0]
+        words_info = alternative.words
+        
+        if not words_info:
+            logger.warning("No words with speaker tags")
+            return []
+        
+        # Build speaker segments by grouping consecutive words from same speaker
+        segments = []
+        current_segment = None
+        
+        for word_info in words_info:
+            speaker_tag = word_info.speaker_tag
+            speaker_id = f"SPEAKER_{speaker_tag:02d}"
+            
+            word = word_info.word
+            start_time = word_info.start_time.total_seconds()
+            end_time = word_info.end_time.total_seconds()
+            
+            # Check if we should start a new segment
+            if current_segment is None or current_segment['speaker_id'] != speaker_id:
+                # Save previous segment
+                if current_segment is not None:
+                    segments.append(current_segment)
+                
+                # Start new segment
+                current_segment = {
+                    'speaker_id': speaker_id,
+                    'start': start_time,
+                    'end': end_time,
+                    'text': word,
+                    'words': [word],
+                }
+            else:
+                # Continue current segment
+                current_segment['end'] = end_time
+                current_segment['text'] += ' ' + word
+                current_segment['words'].append(word)
+        
+        # Add final segment
+        if current_segment is not None:
+            segments.append(current_segment)
+        
+        logger.info(f"Extracted {len(segments)} speaker segments")
+        return segments
     
     def _create_role_mapping(
         self,

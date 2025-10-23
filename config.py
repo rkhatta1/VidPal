@@ -1,9 +1,8 @@
-
 # config.py
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 import os
 
 
@@ -25,13 +24,19 @@ class Settings(BaseSettings):
     # ========== Processing Parameters ==========
     PROCESS_DURATION_MINUTES: int = Field(default=5, ge=1)
     VIDEO_INTERVAL_SECONDS: float = Field(default=8.0, ge=0.5)  # Sparse sampling
+    GCS_BUCKET_NAME: str = Field(default="vidpalai-temp-audio")
+
     
     # ========== Audio/Transcription ==========
     USE_GPU: bool = Field(default=True)
     WHISPER_MODEL: str = Field(default="base")
     WHISPERX_BATCH_SIZE: int = Field(default=16)  # Higher for GPU
     COMPUTE_TYPE: Literal["float16", "int8", "float32"] = Field(default="float16")
-    
+    SPEECH_LANGUAGE_CODE: str = Field(default="en-US")
+    SPEECH_MODEL: str = Field(default="latest_long")
+    EXPECTED_SPEAKERS: Optional[int] = Field(default=None)  # Set if you know exact count
+    MIN_SPEAKERS: int = Field(default=2)
+    MAX_SPEAKERS: int = Field(default=6)
     # ========== EDL Generation ==========
     MIN_SHOT_DURATION: float = Field(default=2.0, ge=0.5)  # Minimum shot length
     WIDE_OPENING_DURATION: float = Field(default=3.0)  # Opening wide shot duration
@@ -79,8 +84,12 @@ class Settings(BaseSettings):
     
     # ========== Feature Flags ==========
     ENABLE_CACHING: bool = Field(default=True)
-    ENABLE_VLM_PROCESSING: bool = Field(default=False)  # Disabled by default
     VLM_SPARSE_FPS: float = Field(default=0.2)  # Very sparse if enabled
+    
+    # ========== VLM Configuration ==========
+    ENABLE_VLM_PROCESSING: bool = Field(default=True)  # Disabled by default
+    VLM_MODEL: str = Field(default="apple/FastVLM-0.5B")
+    VLM_TRANSITION_WINDOW: float = Field(default=1.0)  # Seconds before/after transition
     
     class Config:
         env_file = ".env"
