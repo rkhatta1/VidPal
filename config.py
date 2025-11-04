@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     EMBEDDING_DIM: int = Field(default=768)
     
     # ========== Video/FCPXML ==========
-    FRAME_RATE: float = Field(default=30.0)
+    FRAME_RATE: float = Field(default=30)
     VIDEO_WIDTH: int = Field(default=1920)
     VIDEO_HEIGHT: int = Field(default=1080)
     WINDOWS_PROJECT_ROOT: str = Field(default="E:/Random/VidPal")
@@ -87,7 +87,7 @@ class Settings(BaseSettings):
     VLM_SPARSE_FPS: float = Field(default=0.2)  # Very sparse if enabled
     
     # ========== VLM Configuration ==========
-    ENABLE_VLM_PROCESSING: bool = Field(default=True)  # Disabled by default
+    ENABLE_VLM_PROCESSING: bool = Field(default=False)  # Disabled by default
     VLM_MODEL: str = Field(default="apple/FastVLM-0.5B")
     VLM_TRANSITION_WINDOW: float = Field(default=1.0)  # Seconds before/after transition
     

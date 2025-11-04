@@ -223,10 +223,6 @@ class LLMRefiner:
         - Avoid quick cuts (minimum 3-4 seconds per shot)
         - Longer shots (5-15 seconds) are PREFERRED for conversations
         - Only cut when there's a meaningful reason (speaker change, reaction, emphasis)
-
-        2. **Respect Conversational Flow**
-        - DO NOT interrupt mid-sentence or mid-thought
-        - Let speakers finish complete ideas before cutting
         - Avoid cutting during natural pauses where tension is building
 
         3. **Minimal Camera Movement**
@@ -235,7 +231,7 @@ class LLMRefiner:
         - Reserve reaction shots for truly significant moments only
 
         4. **Shot Duration Guidelines**
-        - Minimum: 3.0 seconds (previously 2.0s)
+        - Minimum: 2.0 seconds
         - Preferred: 5-15 seconds for conversational content
         - Acceptable longer: 20-30+ seconds for engaging stories or explanations
 
@@ -249,12 +245,12 @@ class LLMRefiner:
 
         6. **Camera Selection:**
         - Host speaking for 10+ seconds → cam_host
-        - Guest speaking for 10+ seconds → cam_guest
+        - Guest speaking for 5+ seconds → cam_guest
         - Back-and-forth exchange (< 5s turns) → cam_wide
         - Story/explanation (30+ seconds) → stay on speaker
+        - **IMPORTANT**: If a guest is speaking, prioritize cutting to the guest close-up camera (cam_guest.)
 
         **Output Requirements:**
-        - Keep 70-80% of the original cuts unchanged
         - Only adjust timing/camera if there's clear improvement
         - Merge short cuts into longer ones when possible
         - Ensure NO GAPS between cuts (each cut must start exactly where the previous ended)
