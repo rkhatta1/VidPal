@@ -1,24 +1,29 @@
-
 # edl/rules.py
-from dataclasses import dataclass
-from typing import List, Dict, Any, Optional
 import logging
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
+from config import get_settings
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class Cut:
-    """Represents a single cut in the edit decision list."""
+    """Represents a single video cut/clip."""
     start_time: float
     end_time: float
     camera_id: str
-    reason: str = "speaker"  # For debugging
-
-
-def round_to_frames(t: float, fps: float) -> float:
-    """Round timestamp to nearest frame boundary."""
-    return round(t * fps) / fps
+    reason: str = "default"
+    speaker_id: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            'start_time': self.start_time,
+            'end_time': self.end_time,
+            'camera_id': self.camera_id,
+            'reason': self.reason,
+        }
 
 
 class RuleBasedEDLGenerator:
@@ -26,62 +31,38 @@ class RuleBasedEDLGenerator:
     
     def __init__(
         self,
-        fps: float,
+        fps: int = 30,
         min_shot_s: float = 2.0,
         wide_open_s: float = 3.0,
         rapid_window_s: float = 8.0,
         rapid_changes: int = 3,
         reaction_keywords: Optional[List[str]] = None,
     ):
+        """
+        Initialize EDL generator.
+        
+        Args:
+            fps: Frame rate (default 30fps)
+            min_shot_s: Minimum shot duration in seconds
+            wide_open_s: Duration to show wide shot at start
+            rapid_window_s: Window for detecting rapid changes
+            rapid_changes: Threshold for rapid changes
+            reaction_keywords: Words that trigger reaction shots
+        """
+        self.settings = get_settings()
         self.fps = fps
         self.min_shot_s = min_shot_s
         self.wide_open_s = wide_open_s
         self.rapid_window_s = rapid_window_s
         self.rapid_changes = rapid_changes
-        self.reaction_keywords = reaction_keywords or []
+        self.reaction_keywords = reaction_keywords or [
+            "laugh", "react", "gasp", "wow", "amazing", "shocked", "surprised"
+        ]
         
-    def _eliminate_gaps(
-        self,
-        cuts: List[Cut],
-        start: float,
-        end: float,
-    ) -> List[Cut]:
-        """
-        Eliminate gaps between cuts by extending clips to touch each other.
-        Ensures continuous timeline with no blank frames.
-        """
-        if not cuts:
-            return cuts
+        self.setup_type = getattr(self.settings, 'SETUP_TYPE', 'host_guest')
         
-        result = []
-        
-        for i, cut in enumerate(cuts):
-            if i == 0:
-                # First cut - ensure it starts at timeline start
-                cut.start_time = start
-            else:
-                # Subsequent cuts - start exactly where previous cut ended
-                cut.start_time = result[-1].end_time
-            
-            if i == len(cuts) - 1:
-                # Last cut - extend to end of timeline
-                cut.end_time = end
-            else:
-                # Check for gap with next cut
-                next_cut = cuts[i + 1]
-                if cut.end_time < next_cut.start_time:
-                    # Gap detected - extend this cut to touch next one
-                    gap_size = next_cut.start_time - cut.end_time
-                    if gap_size <= 0.5:  # Small gap - extend current cut
-                        cut.end_time = next_cut.start_time
-                    else:
-                        # Large gap - could be intentional, but still fill it
-                        logger.warning(f"Large gap detected: {gap_size:.2f}s at {cut.end_time:.1f}s")
-                        cut.end_time = next_cut.start_time
-            
-            result.append(cut)
-        
-        return result
+        logger.info(f"EDL generator initialized: {self.setup_type}")
+        logger.info(f"  Min shot: {min_shot_s}s, Wide opening: {wide_open_s}s")
     
     def generate_edl(
         self,
@@ -92,269 +73,338 @@ class RuleBasedEDLGenerator:
         end_time: Optional[float] = None,
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Generate rule-based EDL from speaker segments.
+        Generate rule-based EDL from speaker diarization.
+        
+        This ALWAYS uses speaker diarization data (speaker_segments, role_mapping).
+        Setup type (host_guest, podcast_3p, panel) only affects camera selection logic.
         
         Args:
-            speaker_segments: List of diarization segments
-            role_mapping: Maps speaker_id to role (host/guest)
-            transcript: Optional transcript for reaction detection
-            start_time: Start time of segment to process
-            end_time: End time of segment to process
+            speaker_segments: List of speaker segments from diarization
+            role_mapping: Mapping of speaker_id to role
+            transcript: Optional transcript with word-level timing
+            start_time: Start time for processing
+            end_time: End time for processing
         
         Returns:
-            Dictionary with 'cuts' list
+            Dictionary with 'cuts' key containing list of EDL cuts
         """
-        if end_time is None:
-            end_time = max(seg['end'] for seg in speaker_segments)
         
-        logger.info(f"Generating EDL for {start_time:.1f}s - {end_time:.1f}s")
-        
-        # Step 1: Build speaker turns
-        turns = self._build_turns(speaker_segments, role_mapping, start_time, end_time)
-        if not turns:
+        if not speaker_segments:
+            logger.warning("No speaker segments provided")
             return {"cuts": []}
         
-        # Step 2: Merge consecutive same-camera shots
-        merged = self._merge_consecutive(turns)
+        logger.info(f"Generating {self.setup_type} EDL from {len(speaker_segments)} speaker segments")
         
-        # Step 3: Insert opening wide shot
-        merged = self._insert_opening_wide(merged, start_time, end_time)
+        # Determine the end time
+        if end_time is None:
+            end_time = speaker_segments[-1]['end'] + 1.0
         
-        # Step 4: Detect rapid exchanges and use wide shot
-        merged = self._handle_rapid_exchanges(merged, start_time, end_time)
+        # Route to appropriate EDL generation method based on setup type
+        if self.setup_type == "podcast_3p":
+            cuts = self._generate_podcast_3p_edl(
+                speaker_segments,
+                role_mapping,
+                transcript,
+                start_time,
+                end_time,
+            )
+        elif self.setup_type == "panel":
+            cuts = self._generate_panel_edl(
+                speaker_segments,
+                role_mapping,
+                transcript,
+                start_time,
+                end_time,
+            )
+        else:  # Default: host_guest
+            cuts = self._generate_host_guest_edl(
+                speaker_segments,
+                role_mapping,
+                transcript,
+                start_time,
+                end_time,
+            )
         
-        # Step 5: Insert reaction shots (if transcript provided)
-        if transcript:
-            merged = self._insert_reaction_shots(merged, transcript, role_mapping, start_time, end_time)
+        # Post-processing
+        logger.info(f"Generated {len(cuts)} initial cuts")
         
-        # Step 6: Enforce minimum shot duration
-        merged = self._enforce_min_duration(merged, start_time, end_time)
+        # Enforce minimum duration
+        cuts = self._enforce_min_duration(cuts, start_time, end_time)
+        logger.info(f"After min duration enforcement: {len(cuts)} cuts")
         
-        # Step 7: Eliminate gaps (NEW)
-        merged = self._eliminate_gaps(merged, start_time, end_time)
+        # Eliminate gaps
+        cuts = self._eliminate_gaps(cuts, start_time, end_time)
+        logger.info(f"After gap elimination: {len(cuts)} cuts")
         
-        # Step 8: Round to frames and validate
-        final = self._round_and_validate(merged, start_time, end_time)
+        # Round to frames and validate
+        final = self._round_and_validate(cuts, start_time, end_time)
+        logger.info(f"✅ Final EDL: {len(final)} cuts")
         
-        logger.info(f"✅ Generated {len(final)} cuts")
         return {"cuts": final}
     
-    def _build_turns(
+    def _generate_host_guest_edl(
         self,
         speaker_segments: List[Dict[str, Any]],
         role_mapping: Dict[str, str],
-        start: float,
-        end: float,
-    ) -> List[Cut]:
-        """Build initial camera cuts from speaker segments."""
-        turns = []
-        for seg in speaker_segments:
-            seg_start = max(seg['start'], start)
-            seg_end = min(seg['end'], end)
-            if seg_end <= seg_start:
-                continue
+        transcript: Optional[List[Dict[str, Any]]],
+        start_time: float,
+        end_time: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate EDL for host-guest format.
+        Two main cameras: host and guest.
+        """
+        cuts = []
+        
+        for i, seg in enumerate(speaker_segments):
+            speaker_id = seg['speaker_id']
+            role = role_mapping.get(speaker_id, f"speaker_{speaker_id}")
             
-            role = role_mapping.get(seg['speaker_id'], 'unknown')
-            camera = self._role_to_camera(role)
-            turns.append(Cut(seg_start, seg_end, camera, f"speaker_{role}"))
-        
-        return turns
-    
-    def _role_to_camera(self, role: str) -> str:
-        """Map speaker role to camera ID."""
-        if role == 'host':
-            return 'cam_host'
-        elif role == 'guest':
-            return 'cam_guest'
-        else:
-            return 'cam_wide'
-    
-    def _merge_consecutive(self, cuts: List[Cut]) -> List[Cut]:
-        """Merge consecutive cuts from the same camera."""
-        if not cuts:
-            return []
-        
-        merged = []
-        current = cuts[0]
-        
-        for next_cut in cuts[1:]:
-            # Merge if same camera and close in time
-            if next_cut.camera_id == current.camera_id and next_cut.start_time <= current.end_time + 0.25:
-                current.end_time = max(current.end_time, next_cut.end_time)
+            # Map role to camera
+            if "host" in role.lower():
+                camera = "cam_a"  # Host camera
+                reason = "host speaking"
+            elif "guest" in role.lower():
+                camera = "cam_b"  # Guest camera
+                reason = "guest speaking"
             else:
-                merged.append(current)
-                current = next_cut
-        
-        merged.append(current)
-        return merged
-    
-    def _insert_opening_wide(self, cuts: List[Cut], start: float, end: float) -> List[Cut]:
-        """Insert wide shot at the beginning."""
-        if not cuts:
-            return cuts
-        
-        first_cut = cuts[0]
-        open_end = min(first_cut.start_time + self.wide_open_s, first_cut.end_time, end)
-        
-        if open_end - start >= 1.0:
-            # Insert opening wide
-            opening = Cut(start, open_end, 'cam_wide', 'opening')
+                # Default to wide for unknown roles
+                camera = "cam_wide"
+                reason = f"{role} speaking"
             
-            # Adjust first cut if it overlaps
-            if first_cut.start_time < open_end:
-                first_cut.start_time = open_end
+            cut = {
+                'start_time': seg['start'],
+                'end_time': seg['end'],
+                'camera_id': camera,
+                'reason': reason,
+                'speaker_id': speaker_id,
+            }
             
-            return [opening] + cuts
+            cuts.append(cut)
         
         return cuts
     
-    def _handle_rapid_exchanges(self, cuts: List[Cut], start: float, end: float) -> List[Cut]:
-        """Replace rapid back-and-forth with wide shot."""
-        if len(cuts) < 2:
-            return cuts
-        
-        result = []
-        i = 0
-        
-        while i < len(cuts):
-            window_start = cuts[i].start_time
-            j = i
-            changes = 0
-            last_camera = cuts[i].camera_id
-            
-            # Count camera changes within window
-            while j < len(cuts) and cuts[j].start_time - window_start <= self.rapid_window_s:
-                if cuts[j].camera_id != last_camera:
-                    changes += 1
-                    last_camera = cuts[j].camera_id
-                j += 1
-            
-            # If rapid changes detected, replace with wide shot
-            if changes >= self.rapid_changes:
-                window_end = cuts[min(j - 1, len(cuts) - 1)].end_time
-                result.append(Cut(window_start, window_end, 'cam_wide', 'rapid_exchange'))
-                i = j
-            else:
-                result.append(cuts[i])
-                i += 1
-        
-        return result
-    
-    def _insert_reaction_shots(
+    def _generate_podcast_3p_edl(
         self,
-        cuts: List[Cut],
-        transcript: List[Dict[str, Any]],
+        speaker_segments: List[Dict[str, Any]],
         role_mapping: Dict[str, str],
-        start: float,
-        end: float,
-    ) -> List[Cut]:
-        """Insert reaction shots based on keywords in transcript."""
-        # Detect reaction moments
-        reaction_times = []
-        for word_data in transcript:
-            if word_data['start'] < start or word_data['start'] >= end:
-                continue
-            word = word_data['word'].lower()
-            if any(keyword in word for keyword in self.reaction_keywords):
-                speaker = word_data.get('speaker', 'unknown')
-                reaction_times.append({
-                    'time': word_data['start'],
-                    'speaker': speaker,
-                })
+        transcript: Optional[List[Dict[str, Any]]],
+        start_time: float,
+        end_time: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate EDL for 3-person podcast format.
+        Three participants: 2 with closeup cameras + 1 only visible in wide shot.
+        Uses diarization to determine who is speaking.
+        """
+        cuts = []
         
-        if not reaction_times:
+        logger.debug(f"Podcast 3P setup - Role mapping: {role_mapping}")
+        
+        for i, seg in enumerate(speaker_segments):
+            speaker_id = seg['speaker_id']
+            role = role_mapping.get(speaker_id, f"speaker_{speaker_id}")
+            
+            # Map speaker to camera based on role from diarization
+            camera = self._map_speaker_to_camera_3p(role, speaker_id)
+            
+            cut = {
+                'start_time': seg['start'],
+                'end_time': seg['end'],
+                'camera_id': camera,
+                'reason': f"{role} speaking",
+                'speaker_id': speaker_id,
+            }
+            
+            cuts.append(cut)
+        
+        return cuts
+    
+    def _generate_panel_edl(
+        self,
+        speaker_segments: List[Dict[str, Any]],
+        role_mapping: Dict[str, str],
+        transcript: Optional[List[Dict[str, Any]]],
+        start_time: float,
+        end_time: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate EDL for panel discussion format.
+        Multiple participants, favor wide shots with occasional closeups.
+        """
+        cuts = []
+        
+        for i, seg in enumerate(speaker_segments):
+            speaker_id = seg['speaker_id']
+            role = role_mapping.get(speaker_id, f"speaker_{speaker_id}")
+            
+            # For panels, prefer wide shot by default
+            camera = "cam_wide"
+            
+            # Only use closeup if segment is long (speaker explaining something)
+            if (seg['end'] - seg['start']) > 8.0:
+                # Try to find a closeup camera for this speaker
+                if "person_a" in role.lower() or "speaker_1" in role.lower():
+                    camera = "cam_a"
+                elif "person_b" in role.lower() or "speaker_2" in role.lower():
+                    camera = "cam_b"
+            
+            cut = {
+                'start_time': seg['start'],
+                'end_time': seg['end'],
+                'camera_id': camera,
+                'reason': f"{role} speaking",
+                'speaker_id': speaker_id,
+            }
+            
+            cuts.append(cut)
+        
+        return cuts
+    
+    def _map_speaker_to_camera_3p(self, role: str, speaker_id: str) -> str:
+        """
+        Map speaker to camera for 3-person podcast.
+        Uses diarization roles to determine camera selection.
+        
+        Args:
+            role: Speaker role from role_mapping (e.g., "host", "guest", "person_a")
+            speaker_id: Speaker identifier (e.g., "SPEAKER_00")
+        
+        Returns:
+            Camera ID (cam_a, cam_b, or cam_wide)
+        """
+        role_lower = role.lower()
+        
+        # Check for explicit roles first
+        if "person_a" in role_lower or "host" in role_lower:
+            return "cam_a"
+        
+        elif "person_b" in role_lower or "guest" in role_lower:
+            return "cam_b"
+        
+        elif "person_c" in role_lower:
+            return "cam_wide"  # Person C has no closeup camera
+        
+        # For generic roles, fall back to wide shot
+        return "cam_wide"
+    
+    def _enforce_min_duration(
+        self,
+        cuts: List[Dict[str, Any]],
+        start_time: float,
+        end_time: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        Merge consecutive cuts from same camera if duration is below minimum.
+        Prevents jarring quick cuts.
+        """
+        if not cuts:
             return cuts
         
-        # Insert reaction shots (showing non-speaker)
-        result = []
-        for cut in cuts:
-            result.append(cut)
+        merged = []
+        current = cuts[0].copy()
+        
+        for i in range(1, len(cuts)):
+            next_cut = cuts[i]
+            current_duration = current['end_time'] - current['start_time']
             
-            # Check if any reactions fall within this cut
-            for reaction in reaction_times:
-                if cut.start_time <= reaction['time'] <= cut.end_time:
-                    # Get opposite camera
-                    reactor_role = 'guest' if reaction['speaker'] == 'host' else 'host'
-                    reaction_camera = self._role_to_camera(reactor_role)
-                    
-                    # Only insert if different from current camera
-                    if reaction_camera != cut.camera_id:
-                        reaction_start = reaction['time']
-                        reaction_end = min(reaction_start + 2.0, cut.end_time)
-                        
-                        if reaction_end - reaction_start >= 1.0:
-                            result.append(Cut(
-                                reaction_start,
-                                reaction_end,
-                                reaction_camera,
-                                'reaction'
-                            ))
-        
-        # Sort and remove overlaps
-        result.sort(key=lambda x: x.start_time)
-        return self._remove_overlaps(result)
-    
-    def _remove_overlaps(self, cuts: List[Cut]) -> List[Cut]:
-        """Remove overlapping cuts, keeping the first one."""
-        if not cuts:
-            return []
-        
-        result = [cuts[0]]
-        for cut in cuts[1:]:
-            if cut.start_time >= result[-1].end_time:
-                result.append(cut)
+            # If current cut is too short and same camera, merge
+            if (current_duration < self.min_shot_s and 
+                current['camera_id'] == next_cut['camera_id']):
+                # Extend current cut to include next
+                current['end_time'] = next_cut['end_time']
             else:
-                # Overlap detected - adjust or skip
-                if cut.end_time > result[-1].end_time:
-                    cut.start_time = result[-1].end_time
-                    if cut.end_time - cut.start_time >= 1.0:
-                        result.append(cut)
+                # Keep current cut and move to next
+                merged.append(current)
+                current = next_cut.copy()
         
-        return result
+        # Add final cut
+        merged.append(current)
+        
+        logger.debug(f"After min duration: {len(cuts)} → {len(merged)} cuts")
+        return merged
     
-    def _enforce_min_duration(self, cuts: List[Cut], start: float, end: float) -> List[Cut]:
-        """Enforce minimum shot duration."""
+    def _eliminate_gaps(
+        self,
+        cuts: List[Dict[str, Any]],
+        start_time: float,
+        end_time: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        Eliminate gaps between cuts by extending clips to touch each other.
+        Ensures continuous timeline with no blank frames.
+        """
+        if not cuts:
+            return cuts
+        
         result = []
         
-        for cut in cuts:
-            duration = cut.end_time - cut.start_time
+        for i, cut in enumerate(cuts):
+            adjusted_cut = cut.copy()
             
-            if duration < self.min_shot_s:
-                # Try to merge with previous if same camera
-                if result and result[-1].camera_id == cut.camera_id:
-                    result[-1].end_time = max(result[-1].end_time, cut.end_time)
-                    continue
-                else:
-                    # Extend to minimum duration
-                    cut.end_time = min(end, cut.start_time + self.min_shot_s)
+            if i == 0:
+                # First cut - ensure it starts at segment start
+                adjusted_cut['start_time'] = start_time
+            else:
+                # Subsequent cuts - start exactly where previous ended
+                adjusted_cut['start_time'] = result[-1]['end_time']
             
-            result.append(cut)
+            if i == len(cuts) - 1:
+                # Last cut - extend to segment end
+                adjusted_cut['end_time'] = end_time
+            else:
+                # Check for gap with next cut
+                next_cut = cuts[i + 1]
+                if adjusted_cut['end_time'] < next_cut['start_time']:
+                    # Gap detected - extend this cut to touch next one
+                    adjusted_cut['end_time'] = next_cut['start_time']
+            
+            result.append(adjusted_cut)
         
+        logger.debug(f"Gaps eliminated: {len(cuts)} cuts verified")
         return result
     
-    def _round_and_validate(self, cuts: List[Cut], start: float, end: float) -> List[Dict[str, Any]]:
-        """Round to frames and validate timeline."""
-        result = []
-        last_end = start
+    def _round_and_validate(
+        self,
+        cuts: List[Dict[str, Any]],
+        start_time: float,
+        end_time: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        Round timestamps to frame boundaries and validate cuts.
+        Ensures all times align to 1/fps precision.
+        """
+        frame_duration = 1.0 / self.fps
+        validated = []
         
-        for cut in cuts:
-            s = round_to_frames(max(last_end, cut.start_time), self.fps)
-            e = round_to_frames(cut.end_time, self.fps)
+        for i, cut in enumerate(cuts):
+            # Round to nearest frame
+            start = round(cut['start_time'] / frame_duration) * frame_duration
+            end = round(cut['end_time'] / frame_duration) * frame_duration
             
-            # Ensure at least 1 frame
-            if e <= s:
-                e = s + (1.0 / self.fps)
+            # Ensure minimum duration
+            if (end - start) < self.min_shot_s:
+                logger.warning(f"Cut {i} too short ({end - start:.3f}s), extending")
+                end = start + self.min_shot_s
             
-            # Clamp to bounds
-            s = max(start, s)
-            e = min(end, e)
+            # Ensure within bounds
+            start = max(start, start_time)
+            end = min(end, end_time)
             
-            if e > s:
-                result.append({
-                    'start_time': s,
-                    'end_time': e,
-                    'camera_id': cut.camera_id,
-                })
-                last_end = e
+            # Skip invalid cuts
+            if start >= end:
+                logger.warning(f"Cut {i} is invalid (start >= end), skipping")
+                continue
+            
+            validated_cut = cut.copy()
+            validated_cut['start_time'] = start
+            validated_cut['end_time'] = end
+            
+            validated.append(validated_cut)
         
-        return result
+        return validated
+    
+    def _has_reaction(self, text: str) -> bool:
+        """Check if text contains reaction keywords."""
+        text_lower = text.lower()
+        return any(keyword in text_lower for keyword in self.reaction_keywords)

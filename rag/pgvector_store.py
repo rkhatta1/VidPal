@@ -6,6 +6,7 @@ from google import genai
 from google.genai.types import EmbedContentConfig
 from db.connection import db
 from config import get_settings
+from psycopg2.extensions import adapt, register_adapter, AsIs
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,8 @@ class PGVectorRAGStore:
     
     # rag/pgvector_store.py (corrected ingest_transcript_chunks method)
 
+# rag/pgvector_store.py (FIX the ingest_transcript_chunks method)
+
     def ingest_transcript_chunks(
         self,
         episode_id: str,
@@ -158,18 +161,28 @@ class PGVectorRAGStore:
             
             # Insert new chunks
             for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                # Ensure embedding is a list of plain Python floats
-                if not isinstance(embedding, list):
-                    embedding = list(embedding)
-                
-                # Convert all values to plain Python floats (strip numpy types)
-                embedding = [float(v) for v in embedding]
-                
-                # Convert to pgvector format: [val1,val2,val3,...]
-                # IMPORTANT: Use square brackets, not curly braces!
-                embedding_str = '[' + ','.join(str(v) for v in embedding) + ']'
-                
                 try:
+                    # CRITICAL: Ensure embedding is a list of PLAIN Python floats
+                    if not isinstance(embedding, list):
+                        embedding = list(embedding)
+                    
+                    # Force conversion to plain Python float (not numpy)
+                    # This is the KEY fix - use Python's built-in float()
+                    clean_embedding = []
+                    for val in embedding:
+                        # Convert to plain Python float, stripping any numpy types
+                        clean_val = float(val)
+                        clean_embedding.append(clean_val)
+                    
+                    # Verify all values are now plain Python floats
+                    for val in clean_embedding:
+                        if type(val).__module__ == 'numpy':
+                            raise TypeError(f"Numpy type still present: {type(val)}")
+                    
+                    # Convert to pgvector format: [val1,val2,val3,...]
+                    embedding_str = '[' + ','.join(str(v) for v in clean_embedding) + ']'
+                    
+                    # Insert
                     cursor.execute(
                         """
                         INSERT INTO transcript_chunks 
@@ -179,17 +192,20 @@ class PGVectorRAGStore:
                         (
                             episode_id,
                             i,
-                            chunk['start_time'],
-                            chunk['end_time'],
+                            float(chunk['start_time']),  # Also ensure these are plain floats
+                            float(chunk['end_time']),
                             chunk.get('speaker', 'unknown'),
                             chunk['text'],
-                            embedding_str,  # Use square bracket format
+                            embedding_str,
                             None,
                         )
                     )
+                    
                 except Exception as e:
                     logger.error(f"Failed to insert chunk {i}: {e}")
+                    logger.error(f"Embedding type: {type(embedding)}")
                     logger.error(f"Embedding sample: {embedding[:5]}")
+                    logger.error(f"Value types: {[type(v) for v in embedding[:5]]}")
                     raise
         
         logger.info(f"✅ Ingested {len(chunks)} chunks with Gemini embeddings")
@@ -286,9 +302,9 @@ class PGVectorRAGStore:
                         (
                             episode_id,
                             desc['camera_id'],
-                            desc['time'],
-                            desc['transition_time'],
-                            desc['offset'],
+                            float(desc['time']),
+                            float(desc.get('cut_time', desc['time'])),  # Use cut_time or fallback to time
+                            float(desc.get('offset', 0.0)),
                             desc['description'],
                             embedding_str,
                         )

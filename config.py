@@ -2,7 +2,7 @@
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, Optional, Dict
 import os
 
 
@@ -16,13 +16,25 @@ class Settings(BaseSettings):
     
     MASTER_AUDIO_FILE: Path = Field(default=Path("input/audio.mp3"))
     VIDEO_FILES: dict[str, Path] = Field(default={
-        "cam_host": Path("input/cam_host.mp4"),
-        "cam_guest": Path("input/cam_guest.mp4"),
+        "cam_a": Path("input/cam_a.mp4"),
+        "cam_b": Path("input/cam_b.mp4"),
         "cam_wide": Path("input/cam_wide.mp4"),
     })
+    # ========== Podcast/Video Setup Configuration ==========
+    SETUP_TYPE: str = Field(default="podcast_3p")  # Options: host_guest, podcast_3p, panel, etc.
+    
+    # Camera to participant mapping (empty = use speaker diarization)
+    CAMERA_SETUP: Dict[str, str] = Field(
+        default={
+            "cam_a": "Person A (woman, closeup)",
+            "cam_b": "Person B (man, closeup)",
+            "cam_wide": "All three participants",
+            # Person C doesn't have a dedicated closeup
+        }
+    )
     
     # ========== Processing Parameters ==========
-    PROCESS_DURATION_MINUTES: int = Field(default=5, ge=1)
+    PROCESS_DURATION_MINUTES: int = Field(default=15, ge=1)
     VIDEO_INTERVAL_SECONDS: float = Field(default=8.0, ge=0.5)  # Sparse sampling
     GCS_BUCKET_NAME: str = Field(default="vidpalai-temp-audio")
 
@@ -88,7 +100,7 @@ class Settings(BaseSettings):
     
     # ========== VLM Configuration ==========
     ENABLE_VLM_PROCESSING: bool = Field(default=False)  # Disabled by default
-    VLM_MODEL: str = Field(default="apple/FastVLM-0.5B")
+    VLM_MODEL: str = Field(default="apple/FastVLM-1.5B")
     VLM_TRANSITION_WINDOW: float = Field(default=1.0)  # Seconds before/after transition
     
     class Config:

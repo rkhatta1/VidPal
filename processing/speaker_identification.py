@@ -54,7 +54,7 @@ class SpeakerIdentifier:
         expected_speakers: Optional[int] = None,
         min_speakers: int = 2,
         max_speakers: int = 6,
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, str], List[Dict[str, Any]]]:
         """
         Perform speaker diarization and role mapping.
         
@@ -67,9 +67,9 @@ class SpeakerIdentifier:
             cache_key = f"{file_hash}_{duration_limit_seconds}_{expected_speakers}"
             
             cached = self.cache.get(cache_key, "speaker_diarization")
-            if cached:
-                logger.info("✅ Using cached speaker diarization")
-                return cached['segments'], cached['role_mapping']
+            if cached and 'transcript' in cached:
+                logger.info("✅ Using cached speaker diarization and transcript")
+                return cached['segments'], cached['role_mapping'], cached['transcript']
         
         logger.info(f"Starting speaker identification (device: {self.device})")
         
@@ -88,20 +88,22 @@ class SpeakerIdentifier:
             max_speakers,
         )
         
-        # Extract speaker segments from diarization
+        # Extract speaker segments and transcript from diarization
         speaker_segments = self._extract_speaker_segments(diarization_result)
+        transcript = self._extract_transcript(diarization_result)
         
         # Create role mapping
         role_mapping = self._create_role_mapping(speaker_segments)
         
         unique_speakers = len(set(s['speaker_id'] for s in speaker_segments))
-        logger.info(f"✅ Identified {unique_speakers} speakers in {len(speaker_segments)} segments")
+        logger.info(f"✅ Identified {unique_speakers} speakers and {len(transcript)} words.")
         
         # Cache results
         if self.cache and self.settings.ENABLE_CACHING:
             self.cache.set(cache_key, "speaker_diarization", {
                 'segments': speaker_segments,
                 'role_mapping': role_mapping,
+                'transcript': transcript,
             })
         
         # Save to database
@@ -117,7 +119,7 @@ class SpeakerIdentifier:
         
         self._cleanup_gcs_file(gcs_uri)
         
-        return speaker_segments, role_mapping
+        return speaker_segments, role_mapping, transcript
     
     def _prepare_audio_for_gcs(
         self,
@@ -328,6 +330,32 @@ class SpeakerIdentifier:
         
         logger.info(f"Extracted {len(segments)} speaker segments")
         return segments
+
+    def _extract_transcript(
+        self,
+        response: speech.LongRunningRecognizeResponse,
+    ) -> List[Dict[str, Any]]:
+        """
+        Extract word-level transcript from Google Cloud Speech response.
+        """
+        transcript = []
+        if not response.results or not response.results[-1].alternatives:
+            logger.warning("No transcript data in Speech-to-Text response")
+            return transcript
+
+        words_info = response.results[-1].alternatives[0].words
+
+        for word_info in words_info:
+            transcript.append({
+                'word': word_info.word,
+                'start': word_info.start_time.total_seconds(),
+                'end': word_info.end_time.total_seconds(),
+                'speaker': f"SPEAKER_{word_info.speaker_tag:02d}",
+            })
+        
+        logger.info(f"Extracted transcript with {len(transcript)} words")
+        return transcript
+
     
     def _create_role_mapping(
         self,

@@ -96,9 +96,20 @@ class LLMRefiner:
                     ),
                 )
                 
-                # Parse response
-                refined_segment = json.loads(response.text)
-                refined_edl.extend(refined_segment.get("cuts", segment_cuts))
+                # Parse response and sanitize
+                refined_output = json.loads(response.text)
+                llm_cuts = refined_output.get("cuts", segment_cuts)
+                
+                sanitized_cuts = []
+                for cut in llm_cuts:
+                    try:
+                        cut['start_time'] = float(cut['start_time'])
+                        cut['end_time'] = float(cut['end_time'])
+                        sanitized_cuts.append(cut)
+                    except (ValueError, TypeError, KeyError) as e:
+                        logger.warning(f"Skipping malformed cut from LLM due to {e}: {cut}")
+                
+                refined_edl.extend(sanitized_cuts)
                 
             except Exception as e:
                 logger.warning(f"LLM refinement failed for segment: {e}")
@@ -107,6 +118,8 @@ class LLMRefiner:
         logger.info(f"✅ Refined EDL: {len(base_edl)} → {len(refined_edl)} cuts")
         return refined_edl
     
+# processing/llm_refiner.py (FIX _build_context method)
+
     def _build_context(
         self,
         episode_id: str,
@@ -116,7 +129,11 @@ class LLMRefiner:
         role_mapping: Dict[str, str],
         vlm_descriptions: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """Build context for LLM including RAG retrieval."""
+        """
+        Build context for LLM including RAG and VLM.
+        No artificial limits - Gemini 2.5 Pro can handle large context.
+        """
+        
         # Extract transcript segment
         segment_transcript = [
             w for w in transcript
@@ -143,15 +160,19 @@ class LLMRefiner:
         if current_line:
             transcript_lines.append(f"{role}: {' '.join(current_line)}")
         
+        # Build context dictionary with ALL required fields
         context = {
             "transcript": "\n".join(transcript_lines),
             "start_time": start_time,
             "end_time": end_time,
+            "duration": end_time - start_time,  # ✅ ADD THIS
+            "word_count": len(segment_transcript),
         }
         
-        # Add RAG context if available
+        # Add RAG context (semantic search on transcript)
         if self.rag_store and self.settings.USE_RAG:
-            query = " ".join(transcript_lines[:5])  # Use beginning as query
+            query = " ".join(transcript_lines[:3])
+            
             rag_chunks = self.rag_store.retrieve(
                 query=query,
                 top_k=self.settings.RAG_TOP_K,
@@ -162,106 +183,159 @@ class LLMRefiner:
                 context["similar_moments"] = [
                     {
                         "time": f"{c['start_time']:.1f}s - {c['end_time']:.1f}s",
-                        "text": c['text'][:200],
+                        "text": c['text'],
+                        "similarity": c['similarity'],
                     }
                     for c in rag_chunks
                 ]
-                
-        if vlm_descriptions and self.rag_store:
+        
+        # Add ALL VLM context in time window
+        if self.rag_store and vlm_descriptions:
+            # Retrieve ALL VLM descriptions in this time window
             vlm_context = self.rag_store.retrieve_vlm_context(
                 episode_id=episode_id,
-                start_time=start_time,
-                end_time=end_time,
-                top_k=5,
+                start_time=start_time - 2.0,  # Include 2s buffer before
+                end_time=end_time + 2.0,      # Include 2s buffer after
             )
+            
             if vlm_context:
-                context["visual_descriptions"] = [
-                    {
-                        "time": f"{v['time_seconds']:.1f}s",
-                        "camera": v['camera_id'],
+                # Group by cut time, then by camera for structured presentation
+                by_cut_time = {}
+                for v in vlm_context:
+                    cut_time = v.get('transition_time', v['time_seconds'])
+                    if cut_time not in by_cut_time:
+                        by_cut_time[cut_time] = {}
+                    
+                    cam = v['camera_id']
+                    if cam not in by_cut_time[cut_time]:
+                        by_cut_time[cut_time][cam] = []
+                    
+                    by_cut_time[cut_time][cam].append({
+                        "time": v['time_seconds'],
+                        "offset": v.get('offset_seconds', 0),
                         "description": v['description'],
-                    }
-                    for v in vlm_context
-                ]
+                    })
+                
+                context["visual_descriptions"] = by_cut_time
+                context["vlm_description_count"] = len(vlm_context)
+                
+                logger.debug(f"Added {len(vlm_context)} VLM descriptions to context")
         
         return context
     
+# processing/llm_refiner.py (UPDATED PROMPT)
+
     def _build_refinement_prompt(
-    self,
-    cuts: List[Dict[str, Any]],
-    context: Dict[str, Any],
-    role_mapping: Dict[str, str],
+        self,
+        cuts: List[Dict[str, Any]],
+        context: Dict[str, Any],
+        role_mapping: Dict[str, str],
     ) -> str:
-        """Build prompt for LLM refinement optimized for long-form conversational content."""
+        """
+        Build prompt with podcast-aware context.
+        """
         
-        vlm_section = ""
+        settings = get_settings()
+        
+        # Build camera setup description
+        camera_setup_desc = ""
+        if hasattr(settings, 'CAMERA_SETUP') and settings.CAMERA_SETUP:
+            camera_setup_desc = "\n**Camera Setup:**\n"
+            for camera_id, description in settings.CAMERA_SETUP.items():
+                camera_setup_desc += f"- {camera_id}: {description}\n"
+        
+        prompt = f"""You are an expert video editor specializing in multi-camera podcast and conversational content.
+
+    **Setup:**
+    Format: {settings.SETUP_TYPE}
+    Participants: 3 people
+    Duration: {context['duration']:.1f} seconds
+
+    {camera_setup_desc}
+
+    **Important Notes:**
+    - This is a THREE-PERSON PODCAST (not host/guest)
+    - There are THREE participants but only TWO dedicated closeup cameras
+    - cam_a shows Person A (woman) in closeup
+    - cam_b shows Person B (man) in closeup
+    - cam_wide shows all three participants (Person A, Person B, and Person C who has no dedicated closeup)
+    - Person C can only be shown via cam_wide
+
+    **Context:**
+    Time Range: {context['start_time']:.1f}s - {context['end_time']:.1f}s
+    Duration: {context['duration']:.1f}s
+    Speaker Count: {len(set(role_mapping.values()))}
+
+    **Transcript:**
+    {context['transcript']}
+
+    **Current Cuts (rule-based):**
+    {json.dumps(cuts, indent=2)}
+    """
+        
+        # Add VLM context if available
         if context.get("visual_descriptions"):
-            vlm_section = "\n**Visual Context:**\n"
-            for vd in context["visual_descriptions"]:
-                vlm_section += f"- {vd['time']} [{vd['camera']}]: {vd['description']}\n"
+            vlm_count = context.get('vlm_description_count', 0)
+            prompt += f"\n**Visual Context at Cut Boundaries ({vlm_count} descriptions):**\n"
+            
+            for cut_time in sorted(context["visual_descriptions"].keys()):
+                cut_data = context["visual_descriptions"][cut_time]
+                
+                prompt += f"\n--- Cut at {cut_time:.1f}s ---\n"
+                
+                for camera_id in sorted(cut_data.keys()):
+                    camera_descriptions = cut_data[camera_id]
+                    
+                    prompt += f"\n{camera_id}:\n"
+                    
+                    sorted_descriptions = sorted(camera_descriptions, key=lambda x: x['offset'])
+                    
+                    for desc in sorted_descriptions:
+                        offset = desc['offset']
+                        time = desc['time']
+                        description = desc['description']
+                        
+                        offset_str = f"+{offset:.1f}s" if offset >= 0 else f"{offset:.1f}s"
+                        prompt += f"  [{offset_str}]: {description}\n"
         
-        prompt = f"""You are an expert video editor specializing in long-form conversational content (podcasts, interviews, panel discussions).
+        # Add podcast-specific editing guidelines
+        prompt += """
 
-        **Context:**
-        Time: {context['start_time']:.1f}s - {context['end_time']:.1f}s
+    **Podcast Editing Guidelines:**
 
-        **Transcript:**
-        {context['transcript']}
+    1.  **Prioritize the Speaker:** The primary camera should be on the person speaking. Use their dedicated closeup (cam_a, cam_b) for engaging, personal moments.
+    2.  **Show Reactions:** Cut to other participants for reactions (nodding, laughing, surprise). A reaction shot on a closeup camera is powerful. If multiple people are reacting, or the reaction is a group dynamic, `cam_wide` is a good choice.
+    3.  **Use the Wide Shot Strategically:** The `cam_wide` shot is your versatile tool. Use it to:
+        *   **Establish the scene:** Start segments with a wide shot to ground the viewer.
+        *   **Cover transitions:** When switching between speakers, a brief cut to wide can smooth the transition.
+        *   **Show the group dynamic:** If everyone is talking or laughing, the wide shot captures that energy.
+        *   **Default for Person C:** When Person C (who has no closeup) is speaking, you must use `cam_wide`.
+    4.  **Pacing and Rhythm:**
+        *   **Avoid rapid-fire cuts:** Let the conversation breathe. Shots should be at least 3-4 seconds long.
+        *   **Vary shot duration:** Mix longer closeup shots (7-15 seconds) with shorter reaction shots or wide shots.
+        *   **Match the energy:** Faster-paced conversation can have slightly quicker cuts. A serious monologue should have a long, focused shot.
+    5.  **Analyze the Visuals:** Use the "Visual Context" descriptions. If a person is looking away, disengaged, or not in their shot, do not cut to their camera. The visual descriptions confirm who is present and engaged.
+    6.  **Continuity is Key:**
+        *   Don't cut away from a speaker mid-sentence unless it's for a very compelling reaction.
+        *   Ensure a smooth flow. Avoid jarring jumps between camera angles (e.g., closeup -> wide -> closeup in rapid succession).
+
+    **Output Requirements:**
+    - Keep 70-80% of original cuts unchanged
+    - Only modify if it improves the viewing experience for podcast format
+    - Ensure no gaps between cuts (continuous timeline)
+    - Round all times to 0.033s (30fps frame boundaries)
+    - Provide reasoning for changes, especially camera selections
+
+    Respond with JSON only:
+    {{
+      "cuts": [
+        {{"start_time": 0.0, "end_time": 4.5, "camera_id": "cam_wide", "reason": "opening shot, all three participants visible"}},
+        {{"start_time": 4.5, "end_time": 9.2, "camera_id": "cam_a", "reason": "Person A speaking, cam_a closeup shows engagement"}},
+        {{...}}
+      ]
+    }}"""
         
-        **VLM description**
-        {vlm_section}
-        
-        **Current Cuts (rule-based):**
-        {json.dumps(cuts, indent=2)}
-
-        **Your Task:**
-        Review the cuts and make MINIMAL adjustments to improve flow and viewer engagement for long-form conversational content.
-
-        **Critical Guidelines for Long-Form Content:**
-
-        1. **Prioritize Continuity Over Action**
-        - Avoid quick cuts (minimum 3-4 seconds per shot)
-        - Longer shots (5-15 seconds) are PREFERRED for conversations
-        - Only cut when there's a meaningful reason (speaker change, reaction, emphasis)
-        - Avoid cutting during natural pauses where tension is building
-
-        3. **Minimal Camera Movement**
-        - Use wide shots for multi-person exchanges or when establishing context
-        - Use speaker close-ups for extended monologues or key points
-        - Reserve reaction shots for truly significant moments only
-
-        4. **Shot Duration Guidelines**
-        - Minimum: 2.0 seconds
-        - Preferred: 5-15 seconds for conversational content
-        - Acceptable longer: 20-30+ seconds for engaging stories or explanations
-
-        5. **When to Cut:**
-        - ✅ Natural speaker changes (only if the new speaker talks for 5+ seconds)
-        - ✅ Clear topic transitions
-        - ✅ Significant reactions (laughter, surprise, disagreement)
-        - ❌ Mid-sentence
-        - ❌ During thinking pauses
-        - ❌ Just for visual variety
-
-        6. **Camera Selection:**
-        - Host speaking for 10+ seconds → cam_host
-        - Guest speaking for 5+ seconds → cam_guest
-        - Back-and-forth exchange (< 5s turns) → cam_wide
-        - Story/explanation (30+ seconds) → stay on speaker
-        - **IMPORTANT**: If a guest is speaking, prioritize cutting to the guest close-up camera (cam_guest.)
-
-        **Output Requirements:**
-        - Only adjust timing/camera if there's clear improvement
-        - Merge short cuts into longer ones when possible
-        - Ensure NO GAPS between cuts (each cut must start exactly where the previous ended)
-        - Round all times to 0.033s (30fps frame boundaries)
-
-        Respond with JSON only:
-        {{
-        "cuts": [
-            {{"start_time": 0.0, "end_time": 5.0, "camera_id": "cam_host", "reason": "host opening statement"}},
-            ...
-        ]
-        }}"""
+        estimated_tokens = len(prompt) // 4
+        logger.info(f"LLM prompt estimated tokens: ~{estimated_tokens} (well under 400K limit)")
         
         return prompt

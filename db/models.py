@@ -163,13 +163,23 @@ class EpisodeRepository:
                 )
     
     @staticmethod
-    def save_edl_cuts(
-        episode_id: str,
-        cuts: List[Dict[str, Any]],
-    ) -> None:
-        """Save EDL cuts."""
+    def save_edl_cuts(episode_id: str, cuts: List[Dict[str, Any]]) -> None:
+        """
+        Save EDL cuts to database.
+        Handles both dict and object formats, with safe field access.
+        
+        Args:
+            episode_id: Episode identifier
+            cuts: List of cut dictionaries
+        """
+        if not cuts:
+            logger.warning("No cuts to save")
+            return
+        
+        logger.info(f"Saving {len(cuts)} EDL cuts for episode {episode_id}")
+        
         with db.get_cursor() as cursor:
-            # Delete existing cuts
+            # Delete existing cuts for this episode
             cursor.execute(
                 "DELETE FROM edl_cuts WHERE episode_id = %s",
                 (episode_id,)
@@ -177,21 +187,48 @@ class EpisodeRepository:
             
             # Insert new cuts
             for i, cut in enumerate(cuts):
-                cursor.execute(
-                    """
-                    INSERT INTO edl_cuts 
-                    (episode_id, start_time, end_time, camera_id, reason, sequence_order)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        episode_id,
-                        cut['start_time'],
-                        cut['end_time'],
-                        cut['camera_id'],
-                        cut.get('reason', 'speaker'),
-                        i,
+                try:
+                    # Handle both dict and object formats
+                    # Use .get() for safe access with defaults
+                    start_time = cut.get('start_time') or getattr(cut, 'start_time', None)
+                    end_time = cut.get('end_time') or getattr(cut, 'end_time', None)
+                    camera_id = cut.get('camera_id') or getattr(cut, 'camera_id', None)
+                    reason = cut.get('reason') or getattr(cut, 'reason', f'cut_{i}')
+                    
+                    # Validate required fields
+                    if start_time is None or end_time is None or camera_id is None:
+                        logger.error(f"Cut {i} missing required fields: {cut}")
+                        logger.error(f"  start_time: {start_time}, end_time: {end_time}, camera_id: {camera_id}")
+                        continue
+                    
+                    # Convert to float
+                    start_time = float(start_time)
+                    end_time = float(end_time)
+                    
+                    # Insert cut
+                    cursor.execute(
+                        """
+                        INSERT INTO edl_cuts 
+                        (episode_id, sequence_order, start_time, end_time, camera_id, reason)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            episode_id,
+                            i,
+                            start_time,
+                            end_time,
+                            str(camera_id),
+                            str(reason),
+                        )
                     )
-                )
+                
+                except Exception as e:
+                    logger.error(f"Failed to insert cut {i}: {e}")
+                    logger.error(f"Cut data: {cut}")
+                    logger.error(f"Cut type: {type(cut)}")
+                    raise
+        
+        logger.info(f"✅ Saved {len(cuts)} cuts to database")
     
     @staticmethod
     def get_edl_cuts(episode_id: str) -> List[Dict[str, Any]]:
