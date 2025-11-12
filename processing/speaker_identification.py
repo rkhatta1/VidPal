@@ -54,12 +54,12 @@ class SpeakerIdentifier:
         expected_speakers: Optional[int] = None,
         min_speakers: int = 2,
         max_speakers: int = 6,
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, str], List[Dict[str, Any]]]:
         """
         Perform speaker diarization and role mapping.
         
         Returns:
-            Tuple of (speaker_segments, role_mapping)
+            Tuple of (speaker_segments, role_mapping, full_transcript)
         """
         # Check cache
         if self.cache and self.settings.ENABLE_CACHING:
@@ -69,7 +69,7 @@ class SpeakerIdentifier:
             cached = self.cache.get(cache_key, "speaker_diarization")
             if cached:
                 logger.info("✅ Using cached speaker diarization")
-                return cached['segments'], cached['role_mapping']
+                return cached['segments'], cached['role_mapping'], cached.get('transcript', [])
         
         logger.info(f"Starting speaker identification (device: {self.device})")
         
@@ -91,6 +91,7 @@ class SpeakerIdentifier:
         # Extract speaker segments from diarization
         speaker_segments = self._extract_speaker_segments(diarization_result)
         
+        full_transcript = self._extract_full_transcript(diarization_result)
         # Create role mapping
         role_mapping = self._create_role_mapping(speaker_segments)
         
@@ -102,6 +103,7 @@ class SpeakerIdentifier:
             self.cache.set(cache_key, "speaker_diarization", {
                 'segments': speaker_segments,
                 'role_mapping': role_mapping,
+                'transcript': full_transcript,
             })
         
         # Save to database
@@ -117,7 +119,39 @@ class SpeakerIdentifier:
         
         self._cleanup_gcs_file(gcs_uri)
         
-        return speaker_segments, role_mapping
+        return speaker_segments, role_mapping, full_transcript
+
+    def _extract_full_transcript(
+        self,
+        response: speech.LongRunningRecognizeResponse,
+    ) -> List[Dict[str, Any]]:
+        """
+        Extract word-level transcript from Google Cloud Speech response.
+        """
+        if not response.results or not response.results[-1].alternatives:
+            logger.warning("No transcript alternatives found")
+            return []
+        
+        alternative = response.results[-1].alternatives[0]
+        words_info = alternative.words
+        
+        if not words_info:
+            logger.warning("No words found in transcript")
+            return []
+        
+        transcript = []
+        for word_info in words_info:
+            transcript.append({
+                "word": word_info.word,
+                "start": word_info.start_time.total_seconds(),
+                "end": word_info.end_time.total_seconds(),
+                "speaker": f"SPEAKER_{word_info.speaker_tag:02d}",
+                # Google Speech API doesn't provide a word-level 'score' like Whisper
+                "score": None, 
+            })
+        
+        logger.info(f"Extracted {len(transcript)} words from Google Speech transcript")
+        return transcript
     
     def _prepare_audio_for_gcs(
         self,

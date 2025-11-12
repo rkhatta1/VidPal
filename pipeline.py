@@ -1,4 +1,3 @@
-
 # pipeline.py
 import logging
 from pathlib import Path
@@ -14,7 +13,6 @@ from db.models import EpisodeRepository
 from utils.caching import Cache
 from rag.pgvector_store import PGVectorRAGStore
 from processing.speaker_identification import SpeakerIdentifier
-from processing.audio_transcription import AudioTranscriber
 from edl.rules import RuleBasedEDLGenerator
 from processing.llm_refiner import LLMRefiner
 from fcpxml.generator import FCPXMLGenerator
@@ -39,7 +37,6 @@ class VidPalAIPipeline:
         self.rag_store = PGVectorRAGStore() if self.settings.USE_RAG else None
         
         self.speaker_identifier = SpeakerIdentifier(cache=self.cache)
-        self.audio_transcriber = AudioTranscriber(cache=self.cache)
         self.edl_generator = RuleBasedEDLGenerator(
             fps=self.settings.FRAME_RATE,
             min_shot_s=self.settings.MIN_SHOT_DURATION,
@@ -125,18 +122,18 @@ class VidPalAIPipeline:
             phase_start = time.time()
             
             # Speaker identification (includes diarization)
-            speaker_segments, role_mapping = self.speaker_identifier.identify_speakers(
+            speaker_segments, role_mapping, transcript = self.speaker_identifier.identify_speakers(
                 audio_path=str(audio_path),
                 episode_id=episode_id,
                 duration_limit_seconds=duration_seconds,
             )
             
             # Audio transcription
-            transcript = self.audio_transcriber.transcribe(
-                audio_path=str(audio_path),
-                duration_limit_seconds=duration_seconds,
-                speaker_segments=speaker_segments,
-            )
+            # transcript = self.audio_transcriber.transcribe(
+            #     audio_path=str(audio_path),
+            #     duration_limit_seconds=duration_seconds,
+            #     speaker_segments=speaker_segments,
+            # )
             
             logger.info(f"✅ Phase 1 completed in {time.time() - phase_start:.1f}s")
             
