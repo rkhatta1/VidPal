@@ -17,6 +17,7 @@ from edl.rules import RuleBasedEDLGenerator
 from processing.llm_refiner import LLMRefiner
 from fcpxml.generator import FCPXMLGenerator
 from processing.vlm_processor import VLMProcessor
+from processing.speaker_camera_mapping import SpeakerCameraMapper
 
 
 logging.basicConfig(
@@ -37,6 +38,8 @@ class VidPalAIPipeline:
         self.rag_store = PGVectorRAGStore() if self.settings.USE_RAG else None
         
         self.speaker_identifier = SpeakerIdentifier(cache=self.cache)
+        self.speaker_camera_mapper = SpeakerCameraMapper()
+
         self.edl_generator = RuleBasedEDLGenerator(
             fps=self.settings.FRAME_RATE,
             min_shot_s=self.settings.MIN_SHOT_DURATION,
@@ -136,6 +139,21 @@ class VidPalAIPipeline:
             # )
             
             logger.info(f"✅ Phase 1 completed in {time.time() - phase_start:.1f}s")
+
+            # PHASE 1.5 - Speaker to Camera Mapping
+            logger.info("\n" + "="*60)
+            logger.info("PHASE 1.5: Speaker-Camera Mapping")
+            logger.info("="*60)
+            
+            phase_start = time.time()
+            
+            role_camera_map = self.speaker_camera_mapper.map_roles_to_cameras(
+                speaker_segments=speaker_segments,
+                role_mapping=role_mapping,
+                video_paths=video_paths
+            )
+            
+            logger.info(f"✅ Phase 1.5 completed in {time.time() - phase_start:.1f}s")
             
             # ===== PHASE 2: RAG Ingestion (Transcript) =====
             if self.rag_store:
@@ -163,6 +181,7 @@ class VidPalAIPipeline:
             edl_result = self.edl_generator.generate_edl(
                 speaker_segments=speaker_segments,
                 role_mapping=role_mapping,
+                role_camera_map=role_camera_map,
                 transcript=transcript,
                 start_time=0.0,
                 end_time=duration_seconds,

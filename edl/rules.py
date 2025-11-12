@@ -1,4 +1,3 @@
-
 # edl/rules.py
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
@@ -87,6 +86,7 @@ class RuleBasedEDLGenerator:
         self,
         speaker_segments: List[Dict[str, Any]],
         role_mapping: Dict[str, str],
+        role_camera_map: Dict[str, str],
         transcript: Optional[List[Dict[str, Any]]] = None,
         start_time: float = 0.0,
         end_time: Optional[float] = None,
@@ -109,8 +109,11 @@ class RuleBasedEDLGenerator:
         
         logger.info(f"Generating EDL for {start_time:.1f}s - {end_time:.1f}s")
         
+        # Get default wide cam
+        wide_cam = role_camera_map.get("default_wide", "cam_wide")
+        
         # Step 1: Build speaker turns
-        turns = self._build_turns(speaker_segments, role_mapping, start_time, end_time)
+        turns = self._build_turns(speaker_segments, role_mapping, role_camera_map, wide_cam, start_time, end_time)
         if not turns:
             return {"cuts": []}
         
@@ -118,15 +121,14 @@ class RuleBasedEDLGenerator:
         merged = self._merge_consecutive(turns)
         
         # Step 3: Insert opening wide shot
-        merged = self._insert_opening_wide(merged, start_time, end_time)
+        merged = self._insert_opening_wide(merged, wide_cam, start_time, end_time)
         
         # Step 4: Detect rapid exchanges and use wide shot
-        merged = self._handle_rapid_exchanges(merged, start_time, end_time)
+        merged = self._handle_rapid_exchanges(merged, wide_cam, start_time, end_time)
         
         # Step 5: Insert reaction shots (if transcript provided)
         if transcript:
-            merged = self._insert_reaction_shots(merged, transcript, role_mapping, start_time, end_time)
-        
+            merged = self._insert_reaction_shots(merged, transcript, role_mapping, role_camera_map, start_time, end_time)
         # Step 6: Enforce minimum shot duration
         merged = self._enforce_min_duration(merged, start_time, end_time)
         
@@ -143,6 +145,8 @@ class RuleBasedEDLGenerator:
         self,
         speaker_segments: List[Dict[str, Any]],
         role_mapping: Dict[str, str],
+        role_camera_map: Dict[str, str],
+        wide_cam: str,
         start: float,
         end: float,
     ) -> List[Cut]:
@@ -155,7 +159,7 @@ class RuleBasedEDLGenerator:
                 continue
             
             role = role_mapping.get(seg['speaker_id'], 'unknown')
-            camera = self._role_to_camera(role)
+            camera = role_camera_map.get(role, wide_cam)
             turns.append(Cut(seg_start, seg_end, camera, f"speaker_{role}"))
         
         return turns
@@ -188,7 +192,7 @@ class RuleBasedEDLGenerator:
         merged.append(current)
         return merged
     
-    def _insert_opening_wide(self, cuts: List[Cut], start: float, end: float) -> List[Cut]:
+    def _insert_opening_wide(self, cuts: List[Cut], wide_cam: str, start: float, end: float) -> List[Cut]:
         """Insert wide shot at the beginning."""
         if not cuts:
             return cuts
@@ -198,7 +202,7 @@ class RuleBasedEDLGenerator:
         
         if open_end - start >= 1.0:
             # Insert opening wide
-            opening = Cut(start, open_end, 'cam_wide', 'opening')
+            opening = Cut(start, open_end, wide_cam, 'opening')
             
             # Adjust first cut if it overlaps
             if first_cut.start_time < open_end:
@@ -208,7 +212,7 @@ class RuleBasedEDLGenerator:
         
         return cuts
     
-    def _handle_rapid_exchanges(self, cuts: List[Cut], start: float, end: float) -> List[Cut]:
+    def _handle_rapid_exchanges(self, cuts: List[Cut], wide_cam: str, start: float, end: float) -> List[Cut]:
         """Replace rapid back-and-forth with wide shot."""
         if len(cuts) < 2:
             return cuts
@@ -232,7 +236,7 @@ class RuleBasedEDLGenerator:
             # If rapid changes detected, replace with wide shot
             if changes >= self.rapid_changes:
                 window_end = cuts[min(j - 1, len(cuts) - 1)].end_time
-                result.append(Cut(window_start, window_end, 'cam_wide', 'rapid_exchange'))
+                result.append(Cut(window_start, window_end, wide_cam, 'rapid_exchange'))
                 i = j
             else:
                 result.append(cuts[i])
@@ -245,6 +249,7 @@ class RuleBasedEDLGenerator:
         cuts: List[Cut],
         transcript: List[Dict[str, Any]],
         role_mapping: Dict[str, str],
+        role_camera_map: Dict[str, str],
         start: float,
         end: float,
     ) -> List[Cut]:
@@ -273,12 +278,20 @@ class RuleBasedEDLGenerator:
             # Check if any reactions fall within this cut
             for reaction in reaction_times:
                 if cut.start_time <= reaction['time'] <= cut.end_time:
-                    # Get opposite camera
-                    reactor_role = 'guest' if reaction['speaker'] == 'host' else 'host'
-                    reaction_camera = self._role_to_camera(reactor_role)
                     
-                    # Only insert if different from current camera
-                    if reaction_camera != cut.camera_id:
+                    # Find role of speaker (e.g., 'host')
+                    speaker_role = role_mapping.get(reaction['speaker'], 'unknown')
+                    
+                    # Find role of non-speaker (e.g., 'guest')
+                    # This is a simple toggle, assumes 2 people
+                    reactor_role = 'guest' if speaker_role == 'host' else 'host'
+                    
+                    # Get the camera for the reactor
+                    reaction_camera = role_camera_map.get(reactor_role)
+                    
+                    # Only insert if we have a camera for the reactor
+                    # and it's different from the current camera
+                    if reaction_camera and reaction_camera != cut.camera_id:
                         reaction_start = reaction['time']
                         reaction_end = min(reaction_start + 2.0, cut.end_time)
                         

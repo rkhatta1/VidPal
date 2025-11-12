@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     COMPUTE_TYPE: Literal["float16", "int8", "float32"] = Field(default="float16")
     SPEECH_LANGUAGE_CODE: str = Field(default="en-US")
     SPEECH_MODEL: str = Field(default="latest_long")
-    EXPECTED_SPEAKERS: Optional[int] = Field(default=None)  # Set if you know exact count
+    EXPECTED_SPEAKERS: Optional[int] = Field(default=3)  # Set if you know exact count
     MIN_SPEAKERS: int = Field(default=2)
     MAX_SPEAKERS: int = Field(default=6)
     # ========== EDL Generation ==========
@@ -88,13 +88,14 @@ class Settings(BaseSettings):
     
     # ========== VLM Configuration ==========
     ENABLE_VLM_PROCESSING: bool = Field(default=True)  # Disabled by default
-    VLM_MODEL: str = Field(default="apple/FastVLM-0.5B")
+    VLM_MODEL: str = Field(default="apple/FastVLM-1.5B")
     VLM_TRANSITION_WINDOW: float = Field(default=1.0)  # Seconds before/after transition
     
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = True
+        extra = 'ignore'
 
 
 # Global settings instance

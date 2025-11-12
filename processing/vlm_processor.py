@@ -24,7 +24,7 @@ class VLMProcessor:
         
         # Load FastVLM model
         logger.info("Loading FastVLM model...")
-        self.model_id = "apple/FastVLM-0.5B"
+        self.model_id = "apple/FastVLM-1.5B"
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_id,
