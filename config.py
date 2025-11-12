@@ -16,13 +16,13 @@ class Settings(BaseSettings):
     
     MASTER_AUDIO_FILE: Path = Field(default=Path("input/audio.mp3"))
     VIDEO_FILES: dict[str, Path] = Field(default={
-        "cam_host": Path("input/cam_host.mp4"),
-        "cam_guest": Path("input/cam_guest.mp4"),
+        "cam_host": Path("input/cam_a.mp4"),
+        "cam_guest": Path("input/cam_b.mp4"),
         "cam_wide": Path("input/cam_wide.mp4"),
     })
     
     # ========== Processing Parameters ==========
-    PROCESS_DURATION_MINUTES: int = Field(default=5, ge=1)
+    PROCESS_DURATION_MINUTES: int = Field(default=15, ge=1)
     VIDEO_INTERVAL_SECONDS: float = Field(default=8.0, ge=0.5)  # Sparse sampling
     GCS_BUCKET_NAME: str = Field(default="vidpalai-temp-audio")
 
@@ -35,8 +35,8 @@ class Settings(BaseSettings):
     SPEECH_LANGUAGE_CODE: str = Field(default="en-US")
     SPEECH_MODEL: str = Field(default="latest_long")
     EXPECTED_SPEAKERS: Optional[int] = Field(default=3)  # Set if you know exact count
-    MIN_SPEAKERS: int = Field(default=2)
-    MAX_SPEAKERS: int = Field(default=6)
+    MIN_SPEAKERS: int = Field(default=3)
+    MAX_SPEAKERS: int = Field(default=3)
     # ========== EDL Generation ==========
     MIN_SHOT_DURATION: float = Field(default=2.0, ge=0.5)  # Minimum shot length
     WIDE_OPENING_DURATION: float = Field(default=3.0)  # Opening wide shot duration

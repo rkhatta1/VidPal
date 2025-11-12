@@ -1,4 +1,4 @@
-# processing/speaker_camera_mapping.py
+# processing/speaker_camera_mapping.py (Corrected for Vertex AI)
 import logging
 from typing import List, Dict, Any, Optional
 from pathlib import Path
@@ -6,8 +6,10 @@ import tempfile
 import subprocess
 import os
 import time
+import uuid
 from google import genai
-from google.api_core import exceptions
+from google.genai import types
+from google.cloud import storage  # NEW IMPORT
 from config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -35,9 +37,12 @@ class SpeakerCameraMapper:
             self.client = genai.Client(
                 api_key=self.settings.GOOGLE_API_KEY,
             )
+        
+        # NEW: Initialize GCS Client
+        self.storage_client = storage.Client(
+            project=self.settings.GOOGLE_CLOUD_PROJECT
+        )
             
-        # Use a model that supports video
-        # self.model = self.client.models.get(self.settings.GEMINI_MODEL)
         logger.info(f"✅ Speaker Camera Mapper initialized (model: {self.settings.GEMINI_MODEL})")
     
     def _extract_snippet(
@@ -82,35 +87,59 @@ class SpeakerCameraMapper:
             Path(temp_snippet_path).unlink(missing_ok=True)
             return None
     
-    def _upload_to_gemini(self, file_path: str) -> Optional[genai.types.File]:
+    # NEW GCS UPLOAD METHOD (from speaker_identification.py)
+    def _upload_to_gcs(self, file_path: str) -> Optional[str]:
         """
-        Uploads a video file to the Gemini API.
+        Upload audio file to Google Cloud Storage.
+        Returns:
+            GCS URI (gs://bucket-name/path/to/file.mp4)
         """
-        logger.info(f"Uploading {file_path} to Gemini API...")
-        try:
-            video_file = self.client.files.create(
-                path=file_path,
-                display_name=Path(file_path).name,
-            )
-            
-            # Wait for processing
-            state = video_file.state.name
-            while state == "PROCESSING":
-                logger.info("Waiting for Gemini file processing...")
-                time.sleep(2)
-                video_file = self.client.files.get(video_file.name)
-                state = video_file.state.name
-            
-            if state == "FAILED":
-                logger.error(f"Gemini file upload failed: {video_file.state.processing_failure_reason}")
-                return None
-            
-            logger.info(f"✅ File uploaded and ready: {video_file.name}")
-            return video_file
+        bucket_name = self.settings.GCS_BUCKET_NAME
         
+        try:
+            bucket = self.storage_client.bucket(bucket_name)
+            if not bucket.exists():
+                logger.info(f"Creating GCS bucket: {bucket_name}")
+                bucket = self.storage_client.create_bucket(
+                    bucket_name,
+                    location=self.settings.GOOGLE_CLOUD_LOCATION
+                )
         except Exception as e:
-            logger.error(f"Failed to upload video to Gemini: {e}")
+            logger.error(f"Failed to access/create bucket: {e}")
             return None
+        
+        # Generate unique blob name
+        blob_name = f"vidpalai/speaker_mapping/{uuid.uuid4().hex}.mp4"
+        blob = bucket.blob(blob_name)
+        
+        # Upload file
+        logger.info(f"Uploading snippet to GCS: gs://{bucket_name}/{blob_name}")
+        try:
+            blob.upload_from_filename(file_path)
+            gcs_uri = f"gs://{bucket_name}/{blob_name}"
+            logger.info(f"✅ Snippet uploaded to: {gcs_uri}")
+            return gcs_uri
+        except Exception as e:
+            logger.error(f"GCS upload failed: {e}")
+            return None
+
+    # NEW GCS CLEANUP METHOD (from speaker_identification.py)
+    def _cleanup_gcs_file(self, gcs_uri: str) -> None:
+        """Delete temporary file from GCS."""
+        try:
+            if not gcs_uri.startswith("gs://"):
+                return
+            
+            path_parts = gcs_uri[5:].split("/", 1)
+            bucket_name = path_parts[0]
+            blob_name = path_parts[1]
+            
+            bucket = self.storage_client.bucket(bucket_name)
+            blob = bucket.blob(blob_name)
+            blob.delete()
+            logger.info(f"Cleaned up GCS file: {gcs_uri}")
+        except Exception as e:
+            logger.warning(f"Failed to cleanup GCS file: {e}")
     
     def map_roles_to_cameras(
         self,
@@ -120,52 +149,49 @@ class SpeakerCameraMapper:
     ) -> Dict[str, str]:
         """
         Finds the correct camera for each speaker role.
-        
-        Returns:
-            A map of {role: camera_id}, e.g., {"host": "cam_a", "guest": "cam_b"}
         """
         logger.info("Starting speaker-to-camera mapping...")
         final_role_camera_map = {}
         
-        # Get unique speaker IDs (e.g., 'SPEAKER_00', 'SPEAKER_01')
         unique_speaker_ids = set(seg['speaker_id'] for seg in speaker_segments)
         
         for speaker_id in unique_speaker_ids:
-            # Find the role for this speaker (e.g., 'host')
             role = role_mapping.get(speaker_id)
             if not role:
                 logger.warning(f"No role found for {speaker_id}, skipping.")
                 continue
             
-            # Find a good, long segment for this speaker
+            # ... (find longest segment logic is unchanged) ...
             segments = [s for s in speaker_segments if s['speaker_id'] == speaker_id]
             segments.sort(key=lambda s: s['end'] - s['start'], reverse=True)
-            
             if not segments:
                 logger.warning(f"No segments found for {speaker_id}, skipping.")
                 continue
-            
             longest_segment = segments[0]
             mid_timestamp = (longest_segment['start'] + longest_segment['end']) / 2.0
             
             logger.info(f"Analyzing {speaker_id} (role: {role}) at {mid_timestamp:.1f}s")
             
-            # Extract snippets from all cameras at this timestamp
+            # MODIFIED: Upload snippets to GCS
             snippets = {}
-            gemini_files = {}
+            gcs_uris = []
             temp_snippet_paths = []
             
             for camera_id, video_path in video_paths.items():
                 snippet_path = self._extract_snippet(video_path, mid_timestamp)
                 if snippet_path:
-                    gemini_file = self._upload_to_gemini(snippet_path)
-                    if gemini_file:
-                        snippets[camera_id] = genai.Part.from_file(gemini_file)
-                        gemini_files[camera_id] = gemini_file
                     temp_snippet_paths.append(Path(snippet_path))
+                    gcs_uri = self._upload_to_gcs(snippet_path)
+                    if gcs_uri:
+                        # Create a Gemini Part using the GCS URI
+                        snippets[camera_id] = types.Part.from_uri(file_uri=gcs_uri, mime_type="video/mp4")
+                        gcs_uris.append(gcs_uri)
             
             if not snippets:
-                logger.error("No snippets could be extracted or uploaded.")
+                logger.error("No snippets could be extracted or uploaded to GCS.")
+                # Local cleanup just in case
+                for p in temp_snippet_paths:
+                    p.unlink(missing_ok=True)
                 continue
                 
             # Build the prompt
@@ -175,7 +201,6 @@ class SpeakerCameraMapper:
                 "Here are video clips from all available cameras:",
             ]
             
-            # Add all video parts
             for camera_id, part in snippets.items():
                 prompt_parts.append(f"**{camera_id}**:")
                 prompt_parts.append(part)
@@ -187,10 +212,12 @@ class SpeakerCameraMapper:
             
             # Call Gemini
             try:
-                response = self.client.models.generate_content(model=self.settings.GEMINI_MODEL, contents=prompt_parts)
+                response = self.client.models.generate_content(
+                    model=self.settings.GEMINI_MODEL,
+                    contents=prompt_parts
+                )
                 chosen_camera = response.text.strip().replace("'", "").replace('"', "")
                 
-                # Validate response
                 if chosen_camera in video_paths:
                     logger.info(f"✅ Mapped {speaker_id} ({role}) -> {chosen_camera}")
                     final_role_camera_map[role] = chosen_camera
@@ -200,18 +227,14 @@ class SpeakerCameraMapper:
             except Exception as e:
                 logger.error(f"Gemini VLM call failed for {speaker_id}: {e}")
             
-            # Cleanup uploaded files
-            for file in gemini_files.values():
-                try:
-                    self.client.files.delete(file.name)
-                except Exception:
-                    pass # Don't block on cleanup failure
+            # Cleanup GCS files
+            for uri in gcs_uris:
+                self._cleanup_gcs_file(uri)
             
             # Cleanup local snippets
             for p in temp_snippet_paths:
                 p.unlink(missing_ok=True)
                 
-        # Add a default 'wide' camera
         if "cam_wide" in video_paths:
             final_role_camera_map["default_wide"] = "cam_wide"
         

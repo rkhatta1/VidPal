@@ -54,22 +54,23 @@ class SpeakerIdentifier:
         expected_speakers: Optional[int] = None,
         min_speakers: int = 2,
         max_speakers: int = 6,
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, str], List[Dict[str, Any]]]:
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, str], List[Dict[str, Any]], str]:
         """
         Perform speaker diarization and role mapping.
         
         Returns:
-            Tuple of (speaker_segments, role_mapping, full_transcript)
+            Tuple of (speaker_segments, role_mapping, full_transcript, cache_key)
         """
         # Check cache
         if self.cache and self.settings.ENABLE_CACHING:
             file_hash = compute_file_hash(audio_path)
-            cache_key = f"{file_hash}_{duration_limit_seconds}_{expected_speakers}"
+            expected_speakers_val = expected_speakers or self.settings.EXPECTED_SPEAKERS
+            cache_key = f"{file_hash}_{duration_limit_seconds}_{expected_speakers_val}"
             
             cached = self.cache.get(cache_key, "speaker_diarization")
             if cached:
                 logger.info("✅ Using cached speaker diarization")
-                return cached['segments'], cached['role_mapping'], cached.get('transcript', [])
+                return cached['segments'], cached['role_mapping'], cached.get('transcript', []), cache_key
         
         logger.info(f"Starting speaker identification (device: {self.device})")
         
@@ -78,14 +79,19 @@ class SpeakerIdentifier:
         
         # Upload to GCS and get URI
         gcs_uri = self._upload_to_gcs(processed_audio_path, episode_id)
-        
+
+        # Determine speaker counts
+        final_expected_speakers = expected_speakers or self.settings.EXPECTED_SPEAKERS
+        final_min_speakers = final_expected_speakers or min_speakers
+        final_max_speakers = final_expected_speakers or max_speakers
+
         # Perform diarization with Google Cloud Speech-to-Text
         logger.info("Performing speaker diarization with Google Cloud Speech-to-Text...")
         diarization_result = self._diarize_with_google_speech(
             gcs_uri,
-            expected_speakers,
-            min_speakers,
-            max_speakers,
+            final_expected_speakers,
+            final_min_speakers,
+            final_max_speakers,
         )
         
         # Extract speaker segments from diarization
@@ -119,7 +125,7 @@ class SpeakerIdentifier:
         
         self._cleanup_gcs_file(gcs_uri)
         
-        return speaker_segments, role_mapping, full_transcript
+        return speaker_segments, role_mapping, full_transcript, cache_key
 
     def _extract_full_transcript(
         self,

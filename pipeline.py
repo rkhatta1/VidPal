@@ -125,7 +125,7 @@ class VidPalAIPipeline:
             phase_start = time.time()
             
             # Speaker identification (includes diarization)
-            speaker_segments, role_mapping, transcript = self.speaker_identifier.identify_speakers(
+            speaker_segments, role_mapping, transcript, cache_key = self.speaker_identifier.identify_speakers(
                 audio_path=str(audio_path),
                 episode_id=episode_id,
                 duration_limit_seconds=duration_seconds,
@@ -146,12 +146,19 @@ class VidPalAIPipeline:
             logger.info("="*60)
             
             phase_start = time.time()
+            role_camera_map = self.cache.get(cache_key, "speaker_camera_map") if self.cache and cache_key else None
             
-            role_camera_map = self.speaker_camera_mapper.map_roles_to_cameras(
-                speaker_segments=speaker_segments,
-                role_mapping=role_mapping,
-                video_paths=video_paths
-            )
+            if not role_camera_map:
+                logger.info("Cache miss. Running Speaker-Camera mapping...")
+                role_camera_map = self.speaker_camera_mapper.map_roles_to_cameras(
+                    speaker_segments=speaker_segments,
+                    role_mapping=role_mapping,
+                    video_paths=video_paths
+                )
+                if self.cache and cache_key:
+                    self.cache.set(cache_key, "speaker_camera_map", role_camera_map)
+            else:
+                logger.info("✅ Using cached speaker-camera map")
             
             logger.info(f"✅ Phase 1.5 completed in {time.time() - phase_start:.1f}s")
             
@@ -200,19 +207,28 @@ class VidPalAIPipeline:
                 logger.info("="*60)
                 
                 phase_start = time.time()
+                vlm_descriptions = self.cache.get(cache_key, "vlm_descriptions") if self.cache and cache_key else None
                 
-                vlm_descriptions = self.vlm_processor.process_scene_transitions(
-                    video_paths=video_paths,
-                    cuts=cuts,
-                    episode_id=episode_id,
-                )
-                
-                # Store VLM descriptions in RAG
-                if self.rag_store and vlm_descriptions:
-                    self.rag_store.ingest_vlm_descriptions(
+                if not vlm_descriptions:
+                    logger.info("Cache miss. Running VLM processing...")
+                    vlm_descriptions = self.vlm_processor.process_scene_transitions(
+                        video_paths=video_paths,
+                        cuts=cuts,
                         episode_id=episode_id,
-                        vlm_descriptions=vlm_descriptions,
                     )
+                    
+                    # Store VLM descriptions in RAG
+                    if self.rag_store and vlm_descriptions:
+                        self.rag_store.ingest_vlm_descriptions(
+                            episode_id=episode_id,
+                            vlm_descriptions=vlm_descriptions,
+                        )
+                    
+                    # Store in cache
+                    if self.cache and cache_key:
+                        self.cache.set(cache_key, "vlm_descriptions", vlm_descriptions)
+                else:
+                    logger.info("✅ Using cached VLM descriptions")
                 
                 logger.info(f"✅ Phase 4 completed in {time.time() - phase_start:.1f}s")
             

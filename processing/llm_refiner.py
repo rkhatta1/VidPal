@@ -215,19 +215,13 @@ class LLMRefiner:
         {json.dumps(cuts, indent=2)}
 
         **Your Task:**
-        Review the cuts and make MINIMAL adjustments to improve flow and viewer engagement for long-form conversational content.
+        Review the cuts and make adjustments to improve flow and viewer engagement for long-form conversational content.
 
         **Critical Guidelines for Long-Form Content:**
 
         1. **Prioritize Continuity Over Action**
-        - Avoid quick cuts (minimum 3-4 seconds per shot)
         - Longer shots (5-15 seconds) are PREFERRED for conversations
         - Only cut when there's a meaningful reason (speaker change, reaction, emphasis)
-
-        2. **Respect Conversational Flow**
-        - DO NOT interrupt mid-sentence or mid-thought
-        - Let speakers finish complete ideas before cutting
-        - Avoid cutting during natural pauses where tension is building
 
         3. **Minimal Camera Movement**
         - Use wide shots for multi-person exchanges or when establishing context
@@ -235,7 +229,6 @@ class LLMRefiner:
         - Reserve reaction shots for truly significant moments only
 
         4. **Shot Duration Guidelines**
-        - Minimum: 3.0 seconds (previously 2.0s)
         - Preferred: 5-15 seconds for conversational content
         - Acceptable longer: 20-30+ seconds for engaging stories or explanations
 
@@ -254,11 +247,12 @@ class LLMRefiner:
         - Story/explanation (30+ seconds) → stay on speaker
 
         **Output Requirements:**
-        - Keep 70-80% of the original cuts unchanged
         - Only adjust timing/camera if there's clear improvement
         - Merge short cuts into longer ones when possible
         - Ensure NO GAPS between cuts (each cut must start exactly where the previous ended)
         - Round all times to 0.033s (30fps frame boundaries)
+
+        **NOTE:** Prioritize using cam_wide for the majority of the cuts. Especially if there are too many back-and-forths between tehe speakers, consistent laughter or reactions, or uncertainty in the speaker-camera relationship.
 
         Respond with JSON only:
         {{
