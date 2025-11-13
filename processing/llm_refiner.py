@@ -1,4 +1,3 @@
-
 # processing/llm_refiner.py
 import logging
 from typing import List, Dict, Any, Optional
@@ -192,7 +191,10 @@ class LLMRefiner:
     context: Dict[str, Any],
     role_mapping: Dict[str, str],
     ) -> str:
-        """Build prompt for LLM refinement optimized for long-form conversational content."""
+        """
+        Build prompt for LLM refinement optimized for long-form conversational content.
+        (MODIFIED TO BE LESS STRICT AND PRIORITIZE WIDE SHOTS FOR CONVERSATION)
+        """
         
         vlm_section = ""
         if context.get("visual_descriptions"):
@@ -219,40 +221,39 @@ class LLMRefiner:
 
         **Critical Guidelines for Long-Form Content:**
 
-        1. **Prioritize Continuity Over Action**
-        - Longer shots (5-15 seconds) are PREFERRED for conversations
-        - Only cut when there's a meaningful reason (speaker change, reaction, emphasis)
+        1. **Prioritize Conversational Flow:**
+           - The goal is a natural, engaging conversation.
+           - Long shots (5-15 seconds) are good, but *not* if they miss important reactions or create awkward pacing.
+           - **Rule of thumb:** Cut when the *focus* of the conversation changes (new speaker, a reaction, an interjection).
 
-        3. **Minimal Camera Movement**
-        - Use wide shots for multi-person exchanges or when establishing context
-        - Use speaker close-ups for extended monologues or key points
-        - Reserve reaction shots for truly significant moments only
+        2. **USE 'cam_wide' EFFECTIVELY (This is critical):**
+           - **PRIORITY:** Use 'cam_wide' during rapid back-and-forth exchanges (e.g., speaker turns are less than 8 seconds).
+           - **PRIORITY:** Use 'cam_wide' to capture group reactions, laughter, or when multiple people are interacting.
+           - Do *not* stay on a single speaker if the other person has a clear reaction (like laughter or a "wow"). Cut to 'cam_wide' to show both.
+        
+        3. **Shot Duration Guidelines:**
+           - Preferred: 4-10 seconds for conversational content.
+           - Acceptable longer: 15-20+ seconds for engaging stories or explanations.
+           - *Avoid* excessively long, static shots (30+ seconds) unless it's a very compelling monologue.
 
-        4. **Shot Duration Guidelines**
-        - Preferred: 5-15 seconds for conversational content
-        - Acceptable longer: 20-30+ seconds for engaging stories or explanations
+        4. **When to Cut:**
+           - ✅ Natural speaker changes (if the new speaker talks for 2+ seconds).
+           - ✅ Clear topic transitions.
+           - ✅ **Significant reactions** (laughter, surprise, disagreement) -> Use 'cam_wide' or cut to the reactor.
+           - ❌ Avoid cutting mid-sentence *unless* it's to catch an important interjection.
+           - ❌ Avoid cutting during thinking pauses.
 
-        5. **When to Cut:**
-        - ✅ Natural speaker changes (only if the new speaker talks for 5+ seconds)
-        - ✅ Clear topic transitions
-        - ✅ Significant reactions (laughter, surprise, disagreement)
-        - ❌ Mid-sentence
-        - ❌ During thinking pauses
-        - ❌ Just for visual variety
-
-        6. **Camera Selection:**
-        - Host speaking for 10+ seconds → cam_host
-        - Guest speaking for 10+ seconds → cam_guest
-        - Back-and-forth exchange (< 5s turns) → cam_wide
-        - Story/explanation (30+ seconds) → stay on speaker
+        5. **Camera Selection:**
+           - Host speaking for 8+ seconds → cam_host
+           - Guest speaking for 8+ seconds → cam_guest
+           - Back-and-forth exchange (< 8s turns) → **cam_wide**
+           - Group laughter/reaction → **cam_wide**
 
         **Output Requirements:**
-        - Only adjust timing/camera if there's clear improvement
-        - Merge short cuts into longer ones when possible
-        - Ensure NO GAPS between cuts (each cut must start exactly where the previous ended)
-        - Round all times to 0.033s (30fps frame boundaries)
-
-        **NOTE:** Prioritize using cam_wide for the majority of the cuts. Especially if there are too many back-and-forths between tehe speakers, consistent laughter or reactions, or uncertainty in the speaker-camera relationship.
+        - Do not be afraid to keep more cuts if the rule-based ones follow the conversation well.
+        - **Merge cuts only if they are on the same speaker and are unnecessarily short (< 2 seconds).**
+        - Ensure NO GAPS between cuts (each cut must start exactly where the previous ended).
+        - Round all times to 0.033s (30fps frame boundaries).
 
         Respond with JSON only:
         {{

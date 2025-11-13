@@ -198,6 +198,23 @@ class VidPalAIPipeline:
             logger.info(f"Generated {len(cuts)} rule-based cuts")
             
             logger.info(f"✅ Phase 3 completed in {time.time() - phase_start:.1f}s")
+
+            # ===== NEW: Save Base Rule FCPXML =====
+            logger.info("\n" + "="*60)
+            logger.info("PHASE 3.5: Saving Base FCPXML")
+            logger.info("="*60)
+            
+            phase_start = time.time()
+            base_output_path = self.settings.OUTPUT_DIR / f"{episode_id}_base_rules.fcpxml"
+            self.fcpxml_generator.generate(
+                cuts=cuts,
+                video_paths=video_paths,
+                output_path=base_output_path,
+                episode_id=f"{episode_id}_base",
+                master_audio_path=audio_path,
+            )
+            logger.info(f"✅ Base FCPXML saved to {base_output_path}")
+            logger.info(f"✅ Phase 3.5 completed in {time.time() - phase_start:.1f}s")
             
             # ===== PHASE 4: VLM Processing (Optional) =====
             vlm_descriptions = []
@@ -233,6 +250,7 @@ class VidPalAIPipeline:
                 logger.info(f"✅ Phase 4 completed in {time.time() - phase_start:.1f}s")
             
             # ===== PHASE 5: LLM Refinement (Optional) =====
+            base_cuts_count = len(cuts) # Store count for summary
             if self.llm_refiner:
                 logger.info("\n" + "="*60)
                 logger.info("PHASE 5: LLM EDL Refinement")
@@ -255,17 +273,18 @@ class VidPalAIPipeline:
             
             # ===== PHASE 6: FCPXML Generation =====
             logger.info("\n" + "="*60)
-            logger.info("PHASE 6: FCPXML Generation")
+            logger.info("PHASE 6: FCPXML Generation (Refined)")
             logger.info("="*60)
             
             phase_start = time.time()
             
-            output_path = self.settings.OUTPUT_DIR / f"{episode_id}.fcpxml"
+            # MODIFIED: Changed output path name
+            refined_output_path = self.settings.OUTPUT_DIR / f"{episode_id}_refined_llm.fcpxml"
             self.fcpxml_generator.generate(
                 cuts=cuts,
                 video_paths=video_paths,
-                output_path=output_path,
-                episode_id=episode_id,
+                output_path=refined_output_path,
+                episode_id=f"{episode_id}_refined",
                 master_audio_path=audio_path,
             )
             
@@ -281,15 +300,19 @@ class VidPalAIPipeline:
             logger.info("="*60)
             logger.info(f"Episode ID: {episode_id}")
             logger.info(f"Total time: {total_time:.1f}s ({total_time/60:.1f} minutes)")
-            logger.info(f"Cuts generated: {len(cuts)}")
-            logger.info(f"Output: {output_path}")
+            logger.info(f"Cuts (Base): {base_cuts_count}")
+            logger.info(f"Cuts (Refined): {len(cuts)}")
+            logger.info(f"Base Output: {base_output_path}")
+            logger.info(f"Refined Output: {refined_output_path}")
             logger.info("="*60)
             
             return {
                 "episode_id": episode_id,
                 "processing_time": total_time,
-                "cuts_count": len(cuts),
-                "output_path": str(output_path),
+                "cuts_count_base": base_cuts_count,
+                "cuts_count_refined": len(cuts),
+                "output_path_base": str(base_output_path),
+                "output_path_refined": str(refined_output_path),
                 "speakers": len(role_mapping),
                 "transcript_words": len(transcript),
             }
