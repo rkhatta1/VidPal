@@ -48,7 +48,7 @@ class LLMRefiner:
             episode_id: Episode identifier
             base_edl: Rule-based EDL cuts
             transcript: Full transcript with speaker labels
-            role_mapping: Speaker ID to role mapping
+            role_mapping: Speaker ID to role mapping (e.g., 'SPEAKER_00' -> 'speaker_00')
         
         Returns:
             Refined EDL cuts
@@ -129,18 +129,21 @@ class LLMRefiner:
         
         for word_data in segment_transcript:
             speaker = word_data.get('speaker', 'unknown')
-            role = role_mapping.get(speaker, speaker)
+            # MODIFIED: Use role_mapping to get 'speaker_00', 'speaker_01', etc.
+            speaker_label = role_mapping.get(speaker, speaker)
             
             if speaker != current_speaker:
                 if current_line:
-                    transcript_lines.append(f"{role}: {' '.join(current_line)}")
+                    transcript_lines.append(f"{speaker_label}: {' '.join(current_line)}")
                 current_speaker = speaker
                 current_line = []
             
             current_line.append(word_data['word'])
         
         if current_line:
-            transcript_lines.append(f"{role}: {' '.join(current_line)}")
+            # MODIFIED: Use speaker_label for the last line
+            speaker_label = role_mapping.get(current_speaker, current_speaker)
+            transcript_lines.append(f"{speaker_label}: {' '.join(current_line)}")
         
         context = {
             "transcript": "\n".join(transcript_lines),
@@ -192,8 +195,7 @@ class LLMRefiner:
     role_mapping: Dict[str, str],
     ) -> str:
         """
-        Build prompt for LLM refinement optimized for long-form conversational content.
-        (MODIFIED TO BE LESS STRICT AND PRIORITIZE WIDE SHOTS FOR CONVERSATION)
+        MODIFIED: Build a generic prompt for LLM refinement.
         """
         
         vlm_section = ""
@@ -202,63 +204,62 @@ class LLMRefiner:
             for vd in context["visual_descriptions"]:
                 vlm_section += f"- {vd['time']} [{vd['camera']}]: {vd['description']}\n"
         
-        prompt = f"""You are an expert video editor specializing in long-form conversational content (podcasts, interviews, panel discussions).
+        # Get all camera IDs mentioned in the cuts
+        all_cameras = sorted(list(set(c['camera_id'] for c in cuts)))
+        # Get all speaker IDs mentioned in the transcript
+        all_speakers = sorted(list(set(role_mapping.values())))
+
+        prompt = f"""You are an expert video editor. Your task is to refine a sequence of video cuts based on a transcript and visual context.
 
         **Context:**
         Time: {context['start_time']:.1f}s - {context['end_time']:.1f}s
+        Available Cameras: {', '.join(all_cameras)}
+        Visible Speakers: {', '.join(all_speakers)}
 
         **Transcript:**
         {context['transcript']}
         
-        **VLM description**
+        **VLM description (if available):**
         {vlm_section}
         
         **Current Cuts (rule-based):**
         {json.dumps(cuts, indent=2)}
 
         **Your Task:**
-        Review the cuts and make adjustments to improve flow and viewer engagement for long-form conversational content.
+        Review the cuts and make adjustments to improve flow and viewer engagement.
 
-        **Critical Guidelines for Long-Form Content:**
+        **Critical Guidelines:**
 
         1. **Prioritize Conversational Flow:**
            - The goal is a natural, engaging conversation.
-           - Long shots (5-15 seconds) are good, but *not* if they miss important reactions or create awkward pacing.
-           - **Rule of thumb:** Cut when the *focus* of the conversation changes (new speaker, a reaction, an interjection).
+           - Cut when the *focus* of the conversation changes (e.EXAMPLE., a new speaker, a reaction, an interjection).
+           - Longer, continuous shots (5-15 seconds) are generally good, but *not* if they miss important reactions.
 
-        2. **USE 'cam_wide' EFFECTIVELY (This is critical):**
-           - **PRIORITY:** Use 'cam_wide' during rapid back-and-forth exchanges (e.g., speaker turns are less than 8 seconds).
-           - **PRIORITY:** Use 'cam_wide' to capture group reactions, laughter, or when multiple people are interacting.
-           - Do *not* stay on a single speaker if the other person has a clear reaction (like laughter or a "wow"). Cut to 'cam_wide' to show both.
+        2. **Use Wide vs. Close-up Shots Effectively:**
+           - **Wide Shots** (cameras showing multiple people): Use these during rapid back-and-forth exchanges (e.g., speaker turns < 8 seconds), or to capture group reactions and laughter.
+           - **Close-up Shots** (cameras focused on one person): Use these when a speaker is talking for an extended period (8+ seconds) to build connection.
         
         3. **Shot Duration Guidelines:**
-           - Preferred: 4-10 seconds for conversational content.
-           - Acceptable longer: 15-20+ seconds for engaging stories or explanations.
-           - *Avoid* excessively long, static shots (30+ seconds) unless it's a very compelling monologue.
+           - Preferred: 4-10 seconds.
+           - Acceptable longer: 15-20+ seconds for engaging monologues.
+           - *Avoid* excessively long, static shots (30+ seconds).
 
         4. **When to Cut:**
            - ✅ Natural speaker changes (if the new speaker talks for 2+ seconds).
            - ✅ Clear topic transitions.
-           - ✅ **Significant reactions** (laughter, surprise, disagreement) -> Use 'cam_wide' or cut to the reactor.
+           - ✅ **Significant reactions** (laughter, surprise) -> Use a wide shot or cut to the reactor.
            - ❌ Avoid cutting mid-sentence *unless* it's to catch an important interjection.
-           - ❌ Avoid cutting during thinking pauses.
-
-        5. **Camera Selection:**
-           - Host speaking for 8+ seconds → cam_host
-           - Guest speaking for 8+ seconds → cam_guest
-           - Back-and-forth exchange (< 8s turns) → **cam_wide**
-           - Group laughter/reaction → **cam_wide**
 
         **Output Requirements:**
         - Do not be afraid to keep more cuts if the rule-based ones follow the conversation well.
-        - **Merge cuts only if they are on the same speaker and are unnecessarily short (< 2 seconds).**
+        - **Merge cuts only if they are on the same camera and are unnecessarily short (< 2 seconds).**
         - Ensure NO GAPS between cuts (each cut must start exactly where the previous ended).
         - Round all times to 0.033s (30fps frame boundaries).
 
         Respond with JSON only:
         {{
         "cuts": [
-            {{"start_time": 0.0, "end_time": 5.0, "camera_id": "cam_host", "reason": "host opening statement"}},
+            {{"start_time": 0.0, "end_time": 5.0, "camera_id": "cam_a", "reason": "speaker_00 opening"}},
             ...
         ]
         }}"""

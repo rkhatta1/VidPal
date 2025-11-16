@@ -38,7 +38,9 @@ class VidPalAIPipeline:
         self.rag_store = PGVectorRAGStore() if self.settings.USE_RAG else None
         
         self.speaker_identifier = SpeakerIdentifier(cache=self.cache)
-        self.speaker_camera_mapper = SpeakerCameraMapper()
+        
+        # --- RE-ENABLED ---
+        self.speaker_camera_mapper = SpeakerCameraMapper() 
 
         self.edl_generator = RuleBasedEDLGenerator(
             fps=self.settings.FRAME_RATE,
@@ -49,10 +51,11 @@ class VidPalAIPipeline:
             reaction_keywords=self.settings.REACTION_KEYWORDS,
         )
         
+        # --- LLM REFINER ENABLED/DISABLED VIA SETTINGS ---
         if self.settings.REFINE_WITH_LLM:
-            self.llm_refiner = LLMRefiner(rag_store=self.rag_store)
+             self.llm_refiner = LLMRefiner(rag_store=self.rag_store)
         else:
-            self.llm_refiner = None
+             self.llm_refiner = None
             
         if self.settings.ENABLE_VLM_PROCESSING:
             self.vlm_processor = VLMProcessor()
@@ -62,6 +65,12 @@ class VidPalAIPipeline:
         self.fcpxml_generator = FCPXMLGenerator()
         
         logger.info("✅ VidPalAI pipeline initialized")
+        # --- UPDATED LOGS ---
+        if self.llm_refiner:
+            logger.info("LLM Refiner is ENABLED (via .env)")
+        else:
+            logger.warning("LLM Refiner is DISABLED (via .env)")
+        logger.info("AI Speaker-Camera Mapping is ENABLED")
     
     def process_episode(
         self,
@@ -125,18 +134,12 @@ class VidPalAIPipeline:
             phase_start = time.time()
             
             # Speaker identification (includes diarization)
+            # This generates the role_mapping (e.g., 'speaker_00', 'speaker_01')
             speaker_segments, role_mapping, transcript, cache_key = self.speaker_identifier.identify_speakers(
                 audio_path=str(audio_path),
                 episode_id=episode_id,
                 duration_limit_seconds=duration_seconds,
             )
-            
-            # Audio transcription
-            # transcript = self.audio_transcriber.transcribe(
-            #     audio_path=str(audio_path),
-            #     duration_limit_seconds=duration_seconds,
-            #     speaker_segments=speaker_segments,
-            # )
             
             logger.info(f"✅ Phase 1 completed in {time.time() - phase_start:.1f}s")
 
@@ -146,6 +149,8 @@ class VidPalAIPipeline:
             logger.info("="*60)
             
             phase_start = time.time()
+            
+            # --- RE-ENABLED AI MAPPING ---
             role_camera_map = self.cache.get(cache_key, "speaker_camera_map") if self.cache and cache_key else None
             
             if not role_camera_map:
@@ -160,6 +165,15 @@ class VidPalAIPipeline:
             else:
                 logger.info("✅ Using cached speaker-camera map")
             
+            # --- REMOVED MANUAL MAPPING ---
+            
+            # Ensure a default wide cam is set if not mapped by AI
+            if "cam_wide" in video_paths and "default_wide" not in role_camera_map:
+                role_camera_map["default_wide"] = "cam_wide"
+            if "unknown" not in role_camera_map:
+                role_camera_map["unknown"] = "cam_wide"
+
+            logger.info(f"✅ Using AI speaker-camera map: {role_camera_map}")
             logger.info(f"✅ Phase 1.5 completed in {time.time() - phase_start:.1f}s")
             
             # ===== PHASE 2: RAG Ingestion (Transcript) =====
@@ -198,23 +212,6 @@ class VidPalAIPipeline:
             logger.info(f"Generated {len(cuts)} rule-based cuts")
             
             logger.info(f"✅ Phase 3 completed in {time.time() - phase_start:.1f}s")
-
-            # ===== NEW: Save Base Rule FCPXML =====
-            logger.info("\n" + "="*60)
-            logger.info("PHASE 3.5: Saving Base FCPXML")
-            logger.info("="*60)
-            
-            phase_start = time.time()
-            base_output_path = self.settings.OUTPUT_DIR / f"{episode_id}_base_rules.fcpxml"
-            self.fcpxml_generator.generate(
-                cuts=cuts,
-                video_paths=video_paths,
-                output_path=base_output_path,
-                episode_id=f"{episode_id}_base",
-                master_audio_path=audio_path,
-            )
-            logger.info(f"✅ Base FCPXML saved to {base_output_path}")
-            logger.info(f"✅ Phase 3.5 completed in {time.time() - phase_start:.1f}s")
             
             # ===== PHASE 4: VLM Processing (Optional) =====
             vlm_descriptions = []
@@ -249,42 +246,73 @@ class VidPalAIPipeline:
                 
                 logger.info(f"✅ Phase 4 completed in {time.time() - phase_start:.1f}s")
             
+            
+            # --- DYNAMIC FCPXML SAVING LOGIC ---
+            base_cuts_count = len(cuts)
+            base_output_path = None
+            
+            # Set default final paths (for when refiner is off)
+            final_output_path = self.settings.OUTPUT_DIR / f"{episode_id}_final_rules.fcpxml"
+            fcpxml_episode_id = episode_id
+
             # ===== PHASE 5: LLM Refinement (Optional) =====
-            base_cuts_count = len(cuts) # Store count for summary
             if self.llm_refiner:
+                # --- STEP 3.5: Save Base FCPXML ---
+                logger.info("\n" + "="*60)
+                logger.info("PHASE 3.5: Saving Base FCPXML (LLM Refiner is ON)")
+                logger.info("="*60)
+                
+                base_output_path = self.settings.OUTPUT_DIR / f"{episode_id}_base_rules.fcpxml"
+                self.fcpxml_generator.generate(
+                    cuts=cuts, # 'cuts' is still the base EDL
+                    video_paths=video_paths,
+                    output_path=base_output_path,
+                    episode_id=f"{episode_id}_base",
+                    master_audio_path=audio_path,
+                )
+                logger.info(f"✅ Base FCPXML saved to {base_output_path}")
+
+                # --- STEP 5: Run LLM Refinement ---
                 logger.info("\n" + "="*60)
                 logger.info("PHASE 5: LLM EDL Refinement")
                 logger.info("="*60)
                 
                 phase_start = time.time()
                 
-                cuts = self.llm_refiner.refine_edl(
+                cuts = self.llm_refiner.refine_edl( # 'cuts' is now overwritten
                     episode_id=episode_id,
                     base_edl=cuts,
                     transcript=transcript,
                     role_mapping=role_mapping,
-                    vlm_descriptions=vlm_descriptions,  # Pass VLM context
+                    vlm_descriptions=vlm_descriptions,
                 )
                 
                 logger.info(f"✅ Phase 5 completed in {time.time() - phase_start:.1f}s")
+                
+                # Update final path and ID for the refined version
+                final_output_path = self.settings.OUTPUT_DIR / f"{episode_id}_refined_llm.fcpxml"
+                fcpxml_episode_id = f"{episode_id}_refined"
+
+            else:
+                logger.info("\n" + "="*60)
+                logger.info("PHASE 5: LLM EDL Refinement (DISABLED)")
+                logger.info("="*60)
             
-            # Save final EDL to database
+            # Save final EDL to database (will be base or refined)
             EpisodeRepository.save_edl_cuts(episode_id, cuts)
             
             # ===== PHASE 6: FCPXML Generation =====
             logger.info("\n" + "="*60)
-            logger.info("PHASE 6: FCPXML Generation (Refined)")
+            logger.info("PHASE 6: FCPXML Generation (Final)")
             logger.info("="*60)
             
             phase_start = time.time()
             
-            # MODIFIED: Changed output path name
-            refined_output_path = self.settings.OUTPUT_DIR / f"{episode_id}_refined_llm.fcpxml"
             self.fcpxml_generator.generate(
-                cuts=cuts,
+                cuts=cuts, # This is either base or refined
                 video_paths=video_paths,
-                output_path=refined_output_path,
-                episode_id=f"{episode_id}_refined",
+                output_path=final_output_path, # Use the dynamic path
+                episode_id=fcpxml_episode_id, # Use the dynamic ID
                 master_audio_path=audio_path,
             )
             
@@ -300,22 +328,32 @@ class VidPalAIPipeline:
             logger.info("="*60)
             logger.info(f"Episode ID: {episode_id}")
             logger.info(f"Total time: {total_time:.1f}s ({total_time/60:.1f} minutes)")
-            logger.info(f"Cuts (Base): {base_cuts_count}")
-            logger.info(f"Cuts (Refined): {len(cuts)}")
-            logger.info(f"Base Output: {base_output_path}")
-            logger.info(f"Refined Output: {refined_output_path}")
-            logger.info("="*60)
             
-            return {
+            results = {
                 "episode_id": episode_id,
                 "processing_time": total_time,
-                "cuts_count_base": base_cuts_count,
-                "cuts_count_refined": len(cuts),
-                "output_path_base": str(base_output_path),
-                "output_path_refined": str(refined_output_path),
                 "speakers": len(role_mapping),
                 "transcript_words": len(transcript),
             }
+            
+            if self.llm_refiner:
+                logger.info(f"Cuts (Base): {base_cuts_count}")
+                logger.info(f"Cuts (Refined): {len(cuts)}")
+                logger.info(f"Base Output: {base_output_path}")
+                logger.info(f"Refined Output: {final_output_path}")
+                results["cuts_count_base"] = base_cuts_count
+                results["cuts_count_refined"] = len(cuts)
+                results["output_path_base"] = str(base_output_path)
+                results["output_path_refined"] = str(final_output_path)
+            else:
+                logger.info(f"Cuts generated (final): {len(cuts)}")
+                logger.info(f"Output: {final_output_path}")
+                results["cuts_count"] = len(cuts)
+                results["output_path"] = str(final_output_path)
+                
+            logger.info("="*60)
+            
+            return results
             
         except Exception as e:
             logger.error(f"Pipeline failed: {e}", exc_info=True)

@@ -98,7 +98,8 @@ class SpeakerIdentifier:
         speaker_segments = self._extract_speaker_segments(diarization_result)
         
         full_transcript = self._extract_full_transcript(diarization_result)
-        # Create role mapping
+        
+        # Create role mapping (NOW USES NUMERICAL LABELS)
         role_mapping = self._create_role_mapping(speaker_segments)
         
         unique_speakers = len(set(s['speaker_id'] for s in speaker_segments))
@@ -300,7 +301,9 @@ class SpeakerIdentifier:
         )
         
         logger.info("Waiting for operation to complete...")
-        response = operation.result(timeout=600)  # 10 minute timeout
+        
+        # FIXED: Increased timeout from 600 (10 mins) to 3600 (1 hour)
+        response = operation.result(timeout=3600) 
         
         logger.info("✅ Google Cloud Speech-to-Text diarization complete")
         return response
@@ -373,14 +376,15 @@ class SpeakerIdentifier:
         self,
         speaker_segments: List[Dict[str, Any]]
     ) -> Dict[str, str]:
-        """Map speaker IDs to roles based on talk time."""
+        """
+        MODIFIED: Map speaker IDs to abstract numerical roles
+        (e.g., 'speaker_00', 'speaker_01').
+        """
         speaker_durations = defaultdict(float)
-        
         for seg in speaker_segments:
-            duration = seg["end"] - seg["start"]
-            speaker_durations[seg["speaker_id"]] += duration
+            speaker_durations[seg["speaker_id"]] += seg["end"] - seg["start"]
         
-        # Sort by talk time
+        # Sort by talk time, so 'speaker_00' is consistently the most talkative
         sorted_speakers = sorted(
             speaker_durations.items(),
             key=lambda x: x[1],
@@ -388,18 +392,10 @@ class SpeakerIdentifier:
         )
         
         role_mapping = {}
-        if len(sorted_speakers) >= 1:
-            role_mapping[sorted_speakers[0][0]] = "host"
-            logger.info(f"Host: {sorted_speakers[0][0]} ({sorted_speakers[0][1]:.1f}s)")
-        
-        if len(sorted_speakers) >= 2:
-            role_mapping[sorted_speakers[1][0]] = "guest"
-            logger.info(f"Guest: {sorted_speakers[1][0]} ({sorted_speakers[1][1]:.1f}s)")
-        
-        # Additional speakers
-        for i, (speaker_id, duration) in enumerate(sorted_speakers[2:], start=3):
-            role_mapping[speaker_id] = f"speaker_{i}"
-            logger.info(f"Speaker {i}: {speaker_id} ({duration:.1f}s)")
+        for i, (speaker_id, duration) in enumerate(sorted_speakers):
+            role_name = f"speaker_{i:02d}" # e.g., speaker_00, speaker_01
+            role_mapping[speaker_id] = role_name
+            logger.info(f"Mapped: {speaker_id} -> {role_name} ({duration:.1f}s)")
         
         return role_mapping
     

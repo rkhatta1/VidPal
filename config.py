@@ -14,15 +14,15 @@ class Settings(BaseSettings):
     OUTPUT_DIR: Path = Field(default=Path("output"))
     CACHE_DIR: Path = Field(default=Path(".cache"))
     
-    MASTER_AUDIO_FILE: Path = Field(default=Path("input/audio.mp3"))
+    MASTER_AUDIO_FILE: Path = Field(default=Path("input/Longer/audio.mp3"))
     VIDEO_FILES: dict[str, Path] = Field(default={
-        "cam_host": Path("input/cam_a.mp4"),
-        "cam_guest": Path("input/cam_b.mp4"),
-        "cam_wide": Path("input/cam_wide.mp4"),
+        "cam_a": Path("input/Longer/cam_a.mp4"),
+        "cam_b": Path("input/Longer/cam_b.mp4"),
+        "cam_wide": Path("input/Longer/cam_wide.mp4"),
     })
     
     # ========== Processing Parameters ==========
-    PROCESS_DURATION_MINUTES: int = Field(default=15, ge=1)
+    PROCESS_DURATION_MINUTES: int = Field(default=52, ge=1)
     VIDEO_INTERVAL_SECONDS: float = Field(default=8.0, ge=0.5)  # Sparse sampling
     GCS_BUCKET_NAME: str = Field(default="vidpalai-temp-audio")
 
@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     FRAME_RATE: float = Field(default=30.0)
     VIDEO_WIDTH: int = Field(default=1920)
     VIDEO_HEIGHT: int = Field(default=1080)
-    WINDOWS_PROJECT_ROOT: str = Field(default="E:/Random/VidPal")
+    WINDOWS_PROJECT_ROOT: str = Field(default="E:/Random/VidPal/LatestTest/Updated")
     
     # ========== Feature Flags ==========
     ENABLE_CACHING: bool = Field(default=True)

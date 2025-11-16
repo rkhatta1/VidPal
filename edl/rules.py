@@ -26,11 +26,11 @@ class RuleBasedEDLGenerator:
     def __init__(
         self,
         fps: float,
-        min_shot_s: float = 2.0,
+        min_shot_s: float = 2.0,       # Kept for gap elimination
         wide_open_s: float = 3.0,
-        rapid_window_s: float = 8.0,
-        rapid_changes: int = 3,
-        reaction_keywords: Optional[List[str]] = None,
+        rapid_window_s: float = 8.0,   # No longer used in new logic
+        rapid_changes: int = 3,        # No longer used in new logic
+        reaction_keywords: Optional[List[str]] = None, # No longer used in new logic
     ):
         self.fps = fps
         self.min_shot_s = min_shot_s
@@ -54,32 +54,34 @@ class RuleBasedEDLGenerator:
         
         result = []
         
+        # Ensure first cut starts at timeline start
+        if cuts[0].start_time > start:
+            # Fill gap at the beginning with wide cam
+            wide_cam = cuts[0].camera_id if "wide" in cuts[0].camera_id else "cam_wide"
+            result.append(Cut(start, cuts[0].start_time, wide_cam, "gap_fill_start"))
+        
         for i, cut in enumerate(cuts):
-            if i == 0:
-                # First cut - ensure it starts at timeline start
+            if not result:
+                # First cut
                 cut.start_time = start
-            else:
-                # Subsequent cuts - start exactly where previous cut ended
-                cut.start_time = result[-1].end_time
+                result.append(cut)
+                continue
             
-            if i == len(cuts) - 1:
-                # Last cut - extend to end of timeline
-                cut.end_time = end
-            else:
-                # Check for gap with next cut
-                next_cut = cuts[i + 1]
-                if cut.end_time < next_cut.start_time:
-                    # Gap detected - extend this cut to touch next one
-                    gap_size = next_cut.start_time - cut.end_time
-                    if gap_size <= 0.5:  # Small gap - extend current cut
-                        cut.end_time = next_cut.start_time
-                    else:
-                        # Large gap - could be intentional, but still fill it
-                        logger.warning(f"Large gap detected: {gap_size:.2f}s at {cut.end_time:.1f}s")
-                        cut.end_time = next_cut.start_time
+            prev_cut = result[-1]
+            
+            # Check for gap
+            if cut.start_time > prev_cut.end_time:
+                # Gap detected. Extend previous cut to fill it.
+                gap_size = cut.start_time - prev_cut.end_time
+                logger.warning(f"Gap detected: {gap_size:.2f}s at {prev_cut.end_time:.1f}s. Extending previous cut.")
+                prev_cut.end_time = cut.start_time
             
             result.append(cut)
         
+        # Ensure last cut extends to end of timeline
+        if result and result[-1].end_time < end:
+            result[-1].end_time = end
+            
         return result
     
     def generate_edl(
@@ -92,17 +94,13 @@ class RuleBasedEDLGenerator:
         end_time: Optional[float] = None,
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Generate rule-based EDL from speaker segments.
-        
-        Args:
-            speaker_segments: List of diarization segments
-            role_mapping: Maps speaker_id to role (host/guest)
-            transcript: Optional transcript for reaction detection
-            start_time: Start time of segment to process
-            end_time: End time of segment to process
-        
-        Returns:
-            Dictionary with 'cuts' list
+        Generate rule-based EDL from speaker segments
+        using the new simplified logic:
+        1. Start wide.
+        2. On speaker change:
+           - Cut to cam_wide for 5 seconds.
+           - If speaker's segment is > 20s, switch to their close-up.
+           - Otherwise, stay on cam_wide.
         """
         if end_time is None:
             end_time = max(seg['end'] for seg in speaker_segments)
@@ -112,33 +110,95 @@ class RuleBasedEDLGenerator:
         # Get default wide cam
         wide_cam = role_camera_map.get("default_wide", "cam_wide")
         
-        # Step 1: Build speaker turns
-        turns = self._build_turns(speaker_segments, role_mapping, role_camera_map, wide_cam, start_time, end_time)
-        if not turns:
-            return {"cuts": []}
+        # --- NEW SIMPLIFIED LOGIC ---
         
-        # Step 2: Merge consecutive same-camera shots
-        merged = self._merge_consecutive(turns)
+        cuts = []
         
-        # Step 3: Insert opening wide shot
-        merged = self._insert_opening_wide(merged, wide_cam, start_time, end_time)
+        # Rule 1: Start with a wide shot
+        opening_duration = min(self.wide_open_s, end_time)
+        if opening_duration > 0:
+            cuts.append(Cut(start_time, opening_duration, wide_cam, "opening"))
         
-        # Step 4: Detect rapid exchanges and use wide shot
-        merged = self._handle_rapid_exchanges(merged, wide_cam, start_time, end_time)
+        # Rule 2: Process speaker segments
         
-        # Step 5: Insert reaction shots (if transcript provided)
-        if transcript:
-            merged = self._insert_reaction_shots(merged, transcript, role_mapping, role_camera_map, start_time, end_time)
-        # Step 6: Enforce minimum shot duration
+        # Define thresholds from user request
+        STAY_WIDE_DURATION_S = 5.0
+        LONG_SHOT_THRESHOLD_S = 20.0
+        
+        last_speaker_id = None
+        
+        for i, seg in enumerate(speaker_segments):
+            seg_start = max(seg['start'], opening_duration) # Don't overlap opening
+            seg_end = min(seg['end'], end_time)
+            
+            if seg_end <= seg_start:
+                continue
+
+            role = role_mapping.get(seg['speaker_id'], 'unknown')
+            camera = role_camera_map.get(role, wide_cam)
+            segment_duration = seg_end - seg_start
+            
+            # --- Apply the new rules ---
+            
+            # Always start with cam_wide when a speaker *starts*
+            wide_shot_end_time = min(seg_start + STAY_WIDE_DURATION_S, seg_end)
+            
+            cuts.append(Cut(
+                seg_start,
+                wide_shot_end_time,
+                wide_cam,
+                f"wide_intro_{role}"
+            ))
+            
+            # If the segment is long enough AND they have a dedicated camera,
+            # switch to their close-up after the 5s wide intro.
+            if (
+                segment_duration > LONG_SHOT_THRESHOLD_S and
+                camera != wide_cam and
+                wide_shot_end_time < seg_end # Ensure there's time left
+            ):
+                cuts.append(Cut(
+                    wide_shot_end_time,
+                    seg_end,
+                    camera,
+                    f"long_shot_{role}"
+                ))
+            
+            # If segment is short, or they don't have a close-up (like SPEAKER_03),
+            # just extend the wide shot to the end of their segment.
+            elif wide_shot_end_time < seg_end:
+                cuts.append(Cut(
+                    wide_shot_end_time,
+                    seg_end,
+                    wide_cam,
+                    f"short_shot_{role}"
+                ))
+
+            last_speaker_id = seg['speaker_id']
+
+        # --- End of new logic ---
+
+        if not cuts:
+            logger.warning("No cuts generated by new logic. Returning full wide shot.")
+            return {"cuts": [{
+                'start_time': start_time,
+                'end_time': end_time,
+                'camera_id': wide_cam,
+            }]}
+            
+        # Step 3: Merge consecutive same-camera shots
+        merged = self._merge_consecutive(cuts)
+        
+        # Step 4: Enforce minimum shot duration (helps with tiny gaps)
         merged = self._enforce_min_duration(merged, start_time, end_time)
         
-        # Step 7: Eliminate gaps (NEW)
+        # Step 5: Eliminate gaps
         merged = self._eliminate_gaps(merged, start_time, end_time)
         
-        # Step 8: Round to frames and validate
+        # Step 6: Round to frames and validate
         final = self._round_and_validate(merged, start_time, end_time)
         
-        logger.info(f"✅ Generated {len(final)} cuts")
+        logger.info(f"✅ Generated {len(final)} cuts using new simplified logic")
         return {"cuts": final}
     
     def _build_turns(
@@ -182,8 +242,8 @@ class RuleBasedEDLGenerator:
         current = cuts[0]
         
         for next_cut in cuts[1:]:
-            # Merge if same camera and close in time
-            if next_cut.camera_id == current.camera_id and next_cut.start_time <= current.end_time + 0.25:
+            # Merge if same camera and are touching or have a tiny gap
+            if next_cut.camera_id == current.camera_id and next_cut.start_time <= current.end_time + 0.1:
                 current.end_time = max(current.end_time, next_cut.end_time)
             else:
                 merged.append(current)

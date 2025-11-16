@@ -148,29 +148,30 @@ class SpeakerCameraMapper:
         video_paths: Dict[str, Path]
     ) -> Dict[str, str]:
         """
-        Finds the correct camera for each speaker role.
+        Finds the correct camera for each speaker role (now numerical).
         """
         logger.info("Starting speaker-to-camera mapping...")
+        
+        # The role_mapping now contains {'SPEAKER_00': 'speaker_00', ...}
+        # We want to map the 'role' (speaker_00) to a camera.
+        # We need to find the original SPEAKER_00 to get their segments.
+        
+        # Create inverse map: {'speaker_00': 'SPEAKER_00', ...}
+        role_to_speaker_id_map = {v: k for k, v in role_mapping.items()}
+        
         final_role_camera_map = {}
-        
-        unique_speaker_ids = set(seg['speaker_id'] for seg in speaker_segments)
-        
-        for speaker_id in unique_speaker_ids:
-            role = role_mapping.get(speaker_id)
-            if not role:
-                logger.warning(f"No role found for {speaker_id}, skipping.")
-                continue
-            
+
+        for role, speaker_id in role_to_speaker_id_map.items():
             # ... (find longest segment logic is unchanged) ...
             segments = [s for s in speaker_segments if s['speaker_id'] == speaker_id]
             segments.sort(key=lambda s: s['end'] - s['start'], reverse=True)
             if not segments:
-                logger.warning(f"No segments found for {speaker_id}, skipping.")
+                logger.warning(f"No segments found for {speaker_id} ({role}), skipping.")
                 continue
             longest_segment = segments[0]
             mid_timestamp = (longest_segment['start'] + longest_segment['end']) / 2.0
             
-            logger.info(f"Analyzing {speaker_id} (role: {role}) at {mid_timestamp:.1f}s")
+            logger.info(f"Analyzing {speaker_id} (as {role}) at {mid_timestamp:.1f}s")
             
             # MODIFIED: Upload snippets to GCS
             snippets = {}
@@ -194,10 +195,10 @@ class SpeakerCameraMapper:
                     p.unlink(missing_ok=True)
                 continue
                 
-            # Build the prompt
+            # Build the prompt (MODIFIED to be more abstract)
             camera_options = ", ".join(snippets.keys())
             prompt_parts = [
-                f"You are a professional video editor. The audio track confirms that the speaker '{speaker_id}' (role: '{role}') is talking at this moment.",
+                f"You are a professional video editor. The audio track confirms that the speaker '{speaker_id}' is talking at this moment.",
                 "Here are video clips from all available cameras:",
             ]
             
