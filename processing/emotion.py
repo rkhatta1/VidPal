@@ -29,6 +29,74 @@ FACE_DETECTION_CONFIDENCE = 0.5
 VERBOSE_LOG_THRESHOLD = 0.05
 
 
+def cluster_emotion_events(
+events: List[Dict[str, Any]],
+window_seconds: float = 30.0,
+min_events: int = 4
+) -> List[Dict[str, float]]:
+"""
+Clusters emotion events based on density (e.g., 4 events within 30s).
+Returns a list of ranges: [{'start': 126.0, 'end': 142.5}, ...]
+"""
+    if not events:
+        return []
+
+    # Sort by timestamp
+    sorted_events = sorted(events, key=lambda x: x['timestamp'])
+    
+    raw_clusters = []
+    
+    # 1. Identify dense windows
+    # We iterate through every event and treat it as the potential 'start' of a window
+    for i in range(len(sorted_events)):
+        current_window_start = sorted_events[i]['timestamp']
+        current_window_end = current_window_start + window_seconds
+        
+        # Find all events in this 30s window
+        window_events = [
+            e['timestamp'] 
+            for e in sorted_events[i:] 
+            if e['timestamp'] <= current_window_end
+        ]
+        
+        # If threshold met, create a tentative cluster from First to Last event in window
+        if len(window_events) >= min_events:
+            raw_clusters.append({
+                'start': window_events[0],
+                'end': window_events[-1]
+            })
+
+    if not raw_clusters:
+        return []
+
+    # 2. Merge overlapping clusters
+    merged = []
+    if raw_clusters:
+        # Sort by start time
+        raw_clusters.sort(key=lambda x: x['start'])
+        
+        current_start = raw_clusters[0]['start']
+        current_end = raw_clusters[0]['end']
+        
+        for i in range(1, len(raw_clusters)):
+            next_start = raw_clusters[i]['start']
+            next_end = raw_clusters[i]['end']
+            
+            # If next cluster starts before (or exactly when) current ends, merge them
+            if next_start <= current_end:
+                current_end = max(current_end, next_end)
+            else:
+                # Push current and start new
+                merged.append({'start': current_start, 'end': current_end})
+                current_start = next_start
+                current_end = next_end
+        
+        # Append final cluster
+        merged.append({'start': current_start, 'end': current_end})
+            
+    return merged
+
+
 class EmotionDetector:
     """
     Analyzes video files using MediaPipe Face Landmarker to detect
@@ -200,74 +268,6 @@ class EmotionDetector:
                 }
                 
         return None
-
-def cluster_emotion_events(
-events: List[Dict[str, Any]],
-window_seconds: float = 30.0,
-min_events: int = 4
-) -> List[Dict[str, float]]:
-"""
-Clusters emotion events based on density (e.g., 4 events within 30s).
-Returns a list of ranges: [{'start': 126.0, 'end': 142.5}, ...]
-"""
-    if not events:
-        return []
-
-    # Sort by timestamp
-    sorted_events = sorted(events, key=lambda x: x['timestamp'])
-    
-    raw_clusters = []
-    
-    # 1. Identify dense windows
-    # We iterate through every event and treat it as the potential 'start' of a window
-    for i in range(len(sorted_events)):
-        current_window_start = sorted_events[i]['timestamp']
-        current_window_end = current_window_start + window_seconds
-        
-        # Find all events in this 30s window
-        window_events = [
-            e['timestamp'] 
-            for e in sorted_events[i:] 
-            if e['timestamp'] <= current_window_end
-        ]
-        
-        # If threshold met, create a tentative cluster from First to Last event in window
-        if len(window_events) >= min_events:
-            raw_clusters.append({
-                'start': window_events[0],
-                'end': window_events[-1]
-            })
-
-    if not raw_clusters:
-        return []
-
-    # 2. Merge overlapping clusters
-    merged = []
-    if raw_clusters:
-        # Sort by start time
-        raw_clusters.sort(key=lambda x: x['start'])
-        
-        current_start = raw_clusters[0]['start']
-        current_end = raw_clusters[0]['end']
-        
-        for i in range(1, len(raw_clusters)):
-            next_start = raw_clusters[i]['start']
-            next_end = raw_clusters[i]['end']
-            
-            # If next cluster starts before (or exactly when) current ends, merge them
-            if next_start <= current_end:
-                current_end = max(current_end, next_end)
-            else:
-                # Push current and start new
-                merged.append({'start': current_start, 'end': current_end})
-                current_start = next_start
-                current_end = next_end
-        
-        # Append final cluster
-        merged.append({'start': current_start, 'end': current_end})
-            
-    return merged
-
 
 # --- Standalone Test Runner (No changes needed here) ---
 if __name__ == "__main__":
