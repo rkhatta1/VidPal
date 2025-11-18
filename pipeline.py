@@ -15,9 +15,10 @@ from rag.pgvector_store import PGVectorRAGStore
 from processing.speaker_identification import SpeakerIdentifier
 from edl.rules import RuleBasedEDLGenerator
 from processing.llm_refiner import LLMRefiner
-from fcpxml.generator import FCPXMLGenerator
+from fcpxml.premiere_xml_generator import PremiereXMLGenerator
 from processing.vlm_processor import VLMProcessor
 from processing.speaker_camera_mapping import SpeakerCameraMapper
+from processing.emotion import EmotionDetector, cluster_emotion_events
 
 
 logging.basicConfig(
@@ -62,7 +63,7 @@ class VidPalAIPipeline:
         else:
             self.vlm_processor = None
         
-        self.fcpxml_generator = FCPXMLGenerator()
+        self.fcpxml_generator = PremiereXMLGenerator()
         
         logger.info("✅ VidPalAI pipeline initialized")
         # --- UPDATED LOGS ---
@@ -71,6 +72,36 @@ class VidPalAIPipeline:
         else:
             logger.warning("LLM Refiner is DISABLED (via .env)")
         logger.info("AI Speaker-Camera Mapping is ENABLED")
+
+        self.emotion_detector = EmotionDetector()
+        logger.info("✅ Emotion Detector initialized")
+
+    def _run_emotion_detection(
+        self, 
+        video_paths: Dict[str, Path], 
+        episode_id: str,
+        duration_seconds: float
+    ) -> List[Dict[str, Any]]:
+        """Helper to run emotion detection on all cameras."""
+        all_events = []
+        # We usually only need to scan face-facing cameras, but we'll scan all provided
+        for cam_id, vid_path in video_paths.items():
+            # Skip if not a file
+            if not vid_path.exists(): continue
+            
+            # Use the configured CUDA device
+            # Note: In a thread pool, environment variables usually propagate
+            try:
+                for event in self.emotion_detector.detect_emotions(
+                    vid_path, 
+                    cam_id, 
+                    duration_limit_seconds=duration_seconds
+                ):
+                    all_events.append(event)
+            except Exception as e:
+                logger.error(f"Emotion detection failed for {cam_id}: {e}")
+                
+        return all_events
     
     def process_episode(
         self,
@@ -133,15 +164,42 @@ class VidPalAIPipeline:
             
             phase_start = time.time()
             
-            # Speaker identification (includes diarization)
-            # This generates the role_mapping (e.g., 'speaker_00', 'speaker_01')
-            speaker_segments, role_mapping, transcript, cache_key = self.speaker_identifier.identify_speakers(
-                audio_path=str(audio_path),
-                episode_id=episode_id,
-                duration_limit_seconds=duration_seconds,
-            )
+            future_diarization = None
+            future_emotions = None
+            
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                # 1. Submit Audio Diarization
+                logger.info("🚀 Starting Speaker Identification (Thread 1)...")
+                future_diarization = executor.submit(
+                    self.speaker_identifier.identify_speakers,
+                    audio_path=str(audio_path),
+                    episode_id=episode_id,
+                    duration_limit_seconds=duration_seconds,
+                )
+                
+                # 2. Submit Emotion Detection
+                logger.info("🚀 Starting Emotion Detection (Thread 2)...")
+                future_emotions = executor.submit(
+                    self._run_emotion_detection,
+                    video_paths=video_paths,
+                    episode_id=episode_id,
+                    duration_seconds=duration_seconds
+                )
+            
+            # Get Results
+            speaker_segments, role_mapping, transcript, cache_key = future_diarization.result()
+            all_emotion_events = future_emotions.result()
             
             logger.info(f"✅ Phase 1 completed in {time.time() - phase_start:.1f}s")
+            
+            # Store emotions in DB
+            if all_emotion_events:
+                 EpisodeRepository.save_reaction_events(episode_id, all_emotion_events)
+                 logger.info(f"Saved {len(all_emotion_events)} emotion events to DB")
+
+            # Cluster emotions for the XML
+            emotion_clusters = cluster_emotion_events(all_emotion_events)
+            logger.info(f"Identified {len(emotion_clusters)} emotional moments (Adjustment Layers)")
 
             # PHASE 1.5 - Speaker to Camera Mapping
             logger.info("\n" + "="*60)
@@ -252,7 +310,7 @@ class VidPalAIPipeline:
             base_output_path = None
             
             # Set default final paths (for when refiner is off)
-            final_output_path = self.settings.OUTPUT_DIR / f"{episode_id}_final_rules.fcpxml"
+            final_output_path = self.settings.OUTPUT_DIR / f"{episode_id}_final_rules.xml"
             fcpxml_episode_id = episode_id
 
             # ===== PHASE 5: LLM Refinement (Optional) =====
@@ -262,7 +320,7 @@ class VidPalAIPipeline:
                 logger.info("PHASE 3.5: Saving Base FCPXML (LLM Refiner is ON)")
                 logger.info("="*60)
                 
-                base_output_path = self.settings.OUTPUT_DIR / f"{episode_id}_base_rules.fcpxml"
+                base_output_path = self.settings.OUTPUT_DIR / f"{episode_id}_base_rules.xml"
                 self.fcpxml_generator.generate(
                     cuts=cuts, # 'cuts' is still the base EDL
                     video_paths=video_paths,
@@ -290,7 +348,7 @@ class VidPalAIPipeline:
                 logger.info(f"✅ Phase 5 completed in {time.time() - phase_start:.1f}s")
                 
                 # Update final path and ID for the refined version
-                final_output_path = self.settings.OUTPUT_DIR / f"{episode_id}_refined_llm.fcpxml"
+                final_output_path = self.settings.OUTPUT_DIR / f"{episode_id}_refined_llm.xml"
                 fcpxml_episode_id = f"{episode_id}_refined"
 
             else:
@@ -314,6 +372,7 @@ class VidPalAIPipeline:
                 output_path=final_output_path, # Use the dynamic path
                 episode_id=fcpxml_episode_id, # Use the dynamic ID
                 master_audio_path=audio_path,
+                emotion_clusters=emotion_clusters,
             )
             
             logger.info(f"✅ Phase 6 completed in {time.time() - phase_start:.1f}s")

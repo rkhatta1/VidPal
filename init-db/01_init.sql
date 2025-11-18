@@ -95,6 +95,20 @@ CREATE TABLE processing_cache (
 
 CREATE INDEX idx_cache_key_stage ON processing_cache(cache_key, stage);
 
+-- ========== Reaction/Emotion Events Table ==========
+CREATE TABLE reaction_events (
+    id SERIAL PRIMARY KEY,
+    episode_id VARCHAR(255) REFERENCES episodes(episode_id) ON DELETE CASCADE,
+    camera_id VARCHAR(100) NOT NULL,
+    timestamp_seconds FLOAT NOT NULL,
+    event_type VARCHAR(100) NOT NULL, -- e.g., 'laughter'
+    score FLOAT,
+    metadata JSONB,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_reaction_events_episode ON reaction_events(episode_id);
+CREATE INDEX idx_reaction_events_time ON reaction_events(episode_id, timestamp_seconds);
 
 -- ========== RAG/Vector Store Tables ==========
 

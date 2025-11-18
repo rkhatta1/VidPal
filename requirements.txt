@@ -31,3 +31,4 @@ Pillow>=10.1.0
 # Transformers for VLM (FastVLM)
 transformers>=4.36.0
 accelerate>=0.25.0
+mediapipe>=0.10.21

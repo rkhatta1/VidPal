@@ -207,3 +207,33 @@ class EpisodeRepository:
                 (episode_id,)
             )
             return cursor.fetchall()
+
+    @staticmethod
+    def save_reaction_events(
+        episode_id: str,
+        events: List[Dict[str, Any]],
+    ) -> None:
+        """Save detected reaction events."""
+        with db.get_cursor() as cursor:
+            # Delete existing events for this episode to allow re-runs
+            cursor.execute(
+                "DELETE FROM reaction_events WHERE episode_id = %s",
+                (episode_id,)
+            )
+            
+            for event in events:
+                cursor.execute(
+                    """
+                    INSERT INTO reaction_events 
+                    (episode_id, camera_id, timestamp_seconds, event_type, score, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        episode_id,
+                        event['camera'],
+                        event['timestamp'],
+                        event['event'],
+                        event.get('score', 0.0),
+                        json.dumps(event) # Store full event dict as metadata
+                    )
+                )
