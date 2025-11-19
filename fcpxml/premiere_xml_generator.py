@@ -255,6 +255,48 @@ class PremiereXMLGenerator:
                     
                     self.defined_file_ids.add(slug_file_id)
                 
+                # Add Filter: Basic Motion (Scale 0)
+                filt = ET.SubElement(clip, 'filter')
+                eff = ET.SubElement(filt, 'effect')
+                eff.append(self._create_text_elem('name', 'Basic Motion'))
+                eff.append(self._create_text_elem('effectid', 'basic'))
+                eff.append(self._create_text_elem('effectcategory', 'motion'))
+                eff.append(self._create_text_elem('effecttype', 'motion'))
+                eff.append(self._create_text_elem('mediatype', 'video'))
+                eff.append(self._create_text_elem('pproBypass', 'false'))
+                
+                # Scale
+                p_scale = ET.SubElement(eff, 'parameter', authoringApp='PremierePro')
+                p_scale.append(self._create_text_elem('parameterid', 'scale'))
+                p_scale.append(self._create_text_elem('name', 'Scale'))
+                p_scale.append(self._create_text_elem('valuemin', '0'))
+                p_scale.append(self._create_text_elem('valuemax', '1000'))
+                p_scale.append(self._create_text_elem('value', '0')) # Scale 0
+                
+                # Rotation (Required defaults)
+                p_rot = ET.SubElement(eff, 'parameter', authoringApp='PremierePro')
+                p_rot.append(self._create_text_elem('parameterid', 'rotation'))
+                p_rot.append(self._create_text_elem('name', 'Rotation'))
+                p_rot.append(self._create_text_elem('valuemin', '-8640'))
+                p_rot.append(self._create_text_elem('valuemax', '8640'))
+                p_rot.append(self._create_text_elem('value', '0'))
+                
+                # Center (Required defaults)
+                p_cen = ET.SubElement(eff, 'parameter', authoringApp='PremierePro')
+                p_cen.append(self._create_text_elem('parameterid', 'center'))
+                p_cen.append(self._create_text_elem('name', 'Center'))
+                v_cen = ET.SubElement(p_cen, 'value')
+                v_cen.append(self._create_text_elem('horiz', '0'))
+                v_cen.append(self._create_text_elem('vert', '0'))
+
+                # Anchor Point (Required defaults)
+                p_anc = ET.SubElement(eff, 'parameter', authoringApp='PremierePro')
+                p_anc.append(self._create_text_elem('parameterid', 'centerOffset'))
+                p_anc.append(self._create_text_elem('name', 'Anchor Point'))
+                v_anc = ET.SubElement(p_anc, 'value')
+                v_anc.append(self._create_text_elem('horiz', '0'))
+                v_anc.append(self._create_text_elem('vert', '0'))
+                
                 # Add Label
                 labels = ET.SubElement(clip, 'labels')
                 labels.append(self._create_text_elem('label2', "Teal"))
@@ -304,14 +346,11 @@ class PremiereXMLGenerator:
         # --- Safe Write using ET.indent (Python 3.9+) ---
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Pretty print in-place
         ET.indent(xmeml, space="  ", level=0)
         
-        # Convert to tree to write with proper declaration
         tree = ET.ElementTree(xmeml)
         
         with open(output_path, 'wb') as f:
-            # Premiere XML Headers
             f.write(b'<?xml version="1.0" encoding="UTF-8"?>\n')
             f.write(b'<!DOCTYPE xmeml>\n')
             tree.write(f, encoding='utf-8', xml_declaration=False)
