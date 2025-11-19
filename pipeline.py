@@ -1,7 +1,7 @@
 # pipeline.py
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -18,7 +18,7 @@ from processing.llm_refiner import LLMRefiner
 from fcpxml.premiere_xml_generator import PremiereXMLGenerator
 from processing.vlm_processor import VLMProcessor
 from processing.speaker_camera_mapping import SpeakerCameraMapper
-from processing.emotion import EmotionDetector, cluster_emotion_events
+from processing.emotion import EmotionDetector
 
 
 logging.basicConfig(
@@ -73,7 +73,7 @@ class VidPalAIPipeline:
             logger.warning("LLM Refiner is DISABLED (via .env)")
         logger.info("AI Speaker-Camera Mapping is ENABLED")
 
-        self.emotion_detector = EmotionDetector()
+        self.emotion_detector = EmotionDetector(cache=self.cache)
         logger.info("✅ Emotion Detector initialized")
 
     def _run_emotion_detection(
@@ -93,8 +93,9 @@ class VidPalAIPipeline:
             # Note: In a thread pool, environment variables usually propagate
             try:
                 for event in self.emotion_detector.detect_emotions(
-                    vid_path, 
-                    cam_id, 
+                    video_path=vid_path, 
+                    camera_id=cam_id, 
+                    episode_id=episode_id,
                     duration_limit_seconds=duration_seconds
                 ):
                     all_events.append(event)
@@ -198,7 +199,7 @@ class VidPalAIPipeline:
                  logger.info(f"Saved {len(all_emotion_events)} emotion events to DB")
 
             # Cluster emotions for the XML
-            emotion_clusters = cluster_emotion_events(all_emotion_events)
+            emotion_clusters = EmotionDetector.cluster_emotion_events(all_emotion_events)
             logger.info(f"Identified {len(emotion_clusters)} emotional moments (Adjustment Layers)")
 
             # PHASE 1.5 - Speaker to Camera Mapping
@@ -327,6 +328,7 @@ class VidPalAIPipeline:
                     output_path=base_output_path,
                     episode_id=f"{episode_id}_base",
                     master_audio_path=audio_path,
+                    emotion_clusters=emotion_clusters,
                 )
                 logger.info(f"✅ Base FCPXML saved to {base_output_path}")
 
@@ -393,6 +395,8 @@ class VidPalAIPipeline:
                 "processing_time": total_time,
                 "speakers": len(role_mapping),
                 "transcript_words": len(transcript),
+                "emotion_events": len(all_emotion_events),
+                "emotion_clusters": len(emotion_clusters)
             }
             
             if self.llm_refiner:

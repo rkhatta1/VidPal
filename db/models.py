@@ -1,4 +1,3 @@
-
 # db/models.py
 import logging
 from typing import List, Dict, Any, Optional
@@ -213,9 +212,12 @@ class EpisodeRepository:
         episode_id: str,
         events: List[Dict[str, Any]],
     ) -> None:
-        """Save detected reaction events."""
+        """Save detected reaction events to the database."""
+        if not events:
+            return
+
         with db.get_cursor() as cursor:
-            # Delete existing events for this episode to allow re-runs
+            # Clean up previous runs for this episode
             cursor.execute(
                 "DELETE FROM reaction_events WHERE episode_id = %s",
                 (episode_id,)
@@ -234,6 +236,39 @@ class EpisodeRepository:
                         event['timestamp'],
                         event['event'],
                         event.get('score', 0.0),
-                        json.dumps(event) # Store full event dict as metadata
+                        json.dumps(event)
                     )
                 )
+    
+    @staticmethod
+    def get_reaction_events(
+        episode_id: str, 
+        camera_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve reaction events, optionally filtering by camera.
+        Reconstructs the original event dictionary from the DB columns.
+        """
+        sql = "SELECT * FROM reaction_events WHERE episode_id = %s"
+        params = [episode_id]
+        
+        if camera_id:
+            sql += " AND camera_id = %s"
+            params.append(camera_id)
+            
+        sql += " ORDER BY timestamp_seconds"
+        
+        with db.get_cursor() as cursor:
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+            
+        results = []
+        for row in rows:
+            # Reconstruct the event dictionary structure used by EmotionDetector
+            results.append({
+                "timestamp": row['timestamp_seconds'],
+                "event": row['event_type'],
+                "camera": row['camera_id'],
+                "score": row['score']
+            })
+        return results

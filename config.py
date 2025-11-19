@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     FRAME_RATE: float = Field(default=30.0)
     VIDEO_WIDTH: int = Field(default=1920)
     VIDEO_HEIGHT: int = Field(default=1080)
-    WINDOWS_PROJECT_ROOT: str = Field(default="E:/Random/VidPal/LatestTest/Updated")
+    WINDOWS_PROJECT_ROOT: str = Field(default="E:/Random/VidPal/LatestTest/Longer")
     
     # ========== Feature Flags ==========
     ENABLE_CACHING: bool = Field(default=True)

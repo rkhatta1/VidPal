@@ -3,7 +3,6 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 import xml.etree.ElementTree as ET
-from xml.dom import minidom
 from config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -47,40 +46,46 @@ class PremiereXMLGenerator:
             path_str = '/' + path_str
         return f"file://localhost{path_str}"
 
+    def _create_text_elem(self, tag: str, text: str) -> ET.Element:
+        """Helper to create an element with text content."""
+        e = ET.Element(tag)
+        e.text = str(text)
+        return e
+
     def _add_file_definition(self, file_el, file_path, total_frames, is_audio=False):
-        # ... (Same logic as before, just helper method) ...
         file_id = file_el.attrib['id']
         if file_id in self.defined_file_ids:
             return
 
-        ET.SubElement(file_el, 'name').text = file_path.name
-        ET.SubElement(file_el, 'pathurl').text = self._to_windows_path(file_path)
+        file_el.append(self._create_text_elem('name', file_path.name))
+        file_el.append(self._create_text_elem('pathurl', self._to_windows_path(file_path)))
         
         rate_el = ET.SubElement(file_el, 'rate')
-        ET.SubElement(rate_el, 'timebase').text = str(self.timebase)
-        ET.SubElement(rate_el, 'ntsc').text = self.ntsc
-        ET.SubElement(file_el, 'duration').text = str(total_frames)
+        rate_el.append(self._create_text_elem('timebase', self.timebase))
+        rate_el.append(self._create_text_elem('ntsc', self.ntsc))
+        
+        file_el.append(self._create_text_elem('duration', total_frames))
         
         media_el = ET.SubElement(file_el, 'media')
         if is_audio:
             audio_el = ET.SubElement(media_el, 'audio')
-            # ... audio sample characteristics ...
             sample_el = ET.SubElement(audio_el, 'samplecharacteristics')
-            ET.SubElement(sample_el, 'depth').text = "16"
-            ET.SubElement(sample_el, 'samplerate').text = "48000"
-            ET.SubElement(audio_el, 'channelcount').text = "2"
+            sample_el.append(self._create_text_elem('depth', "16"))
+            sample_el.append(self._create_text_elem('samplerate', "48000"))
+            audio_el.append(self._create_text_elem('channelcount', "2"))
         else:
             video_el = ET.SubElement(media_el, 'video')
             sample_el = ET.SubElement(video_el, 'samplecharacteristics')
-            ET.SubElement(sample_el, 'rate').extend([
-                ET.Element('timebase', text=str(self.timebase)),
-                ET.Element('ntsc', text=self.ntsc)
-            ])
-            ET.SubElement(sample_el, 'width').text = str(self.settings.VIDEO_WIDTH)
-            ET.SubElement(sample_el, 'height').text = str(self.settings.VIDEO_HEIGHT)
-            ET.SubElement(sample_el, 'anamorphic').text = "FALSE"
-            ET.SubElement(sample_el, 'pixelaspectratio').text = "square"
-            ET.SubElement(sample_el, 'fielddominance').text = "none"
+            
+            r = ET.SubElement(sample_el, 'rate')
+            r.append(self._create_text_elem('timebase', self.timebase))
+            r.append(self._create_text_elem('ntsc', self.ntsc))
+            
+            sample_el.append(self._create_text_elem('width', self.settings.VIDEO_WIDTH))
+            sample_el.append(self._create_text_elem('height', self.settings.VIDEO_HEIGHT))
+            sample_el.append(self._create_text_elem('anamorphic', "FALSE"))
+            sample_el.append(self._create_text_elem('pixelaspectratio', "square"))
+            sample_el.append(self._create_text_elem('fielddominance', "none"))
         
         self.defined_file_ids.add(file_id)
 
@@ -91,7 +96,7 @@ class PremiereXMLGenerator:
         output_path: Path,
         episode_id: str,
         master_audio_path: Optional[Path] = None,
-        emotion_clusters: Optional[List[Dict[str, float]]] = None, # NEW
+        emotion_clusters: Optional[List[Dict[str, float]]] = None,
     ) -> None:
         logger.info(f"Generating Premiere XMEML with {len(cuts)} cuts...")
         
@@ -112,38 +117,40 @@ class PremiereXMLGenerator:
         # Root
         xmeml = ET.Element('xmeml', version='4')
         sequence = ET.SubElement(xmeml, 'sequence', id="sequence-1")
-        ET.SubElement(sequence, 'uuid').text = episode_id
-        ET.SubElement(sequence, 'duration').text = str(total_duration_frames)
-        ET.SubElement(sequence, 'rate').extend([
-            ET.Element('timebase', text=str(self.timebase)),
-            ET.Element('ntsc', text=self.ntsc)
-        ])
-        ET.SubElement(sequence, 'name').text = episode_id
+        
+        sequence.append(self._create_text_elem('uuid', episode_id))
+        sequence.append(self._create_text_elem('duration', total_duration_frames))
+        
+        seq_rate = ET.SubElement(sequence, 'rate')
+        seq_rate.append(self._create_text_elem('timebase', self.timebase))
+        seq_rate.append(self._create_text_elem('ntsc', self.ntsc))
+        
+        sequence.append(self._create_text_elem('name', episode_id))
         
         media_el = ET.SubElement(sequence, 'media')
         
         # === VIDEO ===
         video_media_el = ET.SubElement(media_el, 'video')
+        
         # Format (Global for sequence)
         fmt = ET.SubElement(video_media_el, 'format')
         sample = ET.SubElement(fmt, 'samplecharacteristics')
-        sample.extend([
-            ET.Element('rate', children=[
-                ET.Element('timebase', text=str(self.timebase)),
-                ET.Element('ntsc', text=self.ntsc)
-            ]),
-            ET.Element('width', text=str(self.settings.VIDEO_WIDTH)),
-            ET.Element('height', text=str(self.settings.VIDEO_HEIGHT)),
-            ET.Element('anamorphic', text="FALSE"),
-            ET.Element('pixelaspectratio', text="square"),
-            ET.Element('fielddominance', text="none"),
-            ET.Element('colordepth', text="24")
-        ])
+        
+        fmt_rate = ET.SubElement(sample, 'rate')
+        fmt_rate.append(self._create_text_elem('timebase', self.timebase))
+        fmt_rate.append(self._create_text_elem('ntsc', self.ntsc))
+        
+        sample.append(self._create_text_elem('width', self.settings.VIDEO_WIDTH))
+        sample.append(self._create_text_elem('height', self.settings.VIDEO_HEIGHT))
+        sample.append(self._create_text_elem('anamorphic', "FALSE"))
+        sample.append(self._create_text_elem('pixelaspectratio', "square"))
+        sample.append(self._create_text_elem('fielddominance', "none"))
+        sample.append(self._create_text_elem('colordepth', "24"))
 
         # --- Track 1: MAIN CUTS ---
         video_track_1 = ET.SubElement(video_media_el, 'track')
-        ET.SubElement(video_track_1, 'enabled').text = "TRUE"
-        ET.SubElement(video_track_1, 'locked').text = "FALSE"
+        video_track_1.append(self._create_text_elem('enabled', "TRUE"))
+        video_track_1.append(self._create_text_elem('locked', "FALSE"))
 
         timeline_start_frame = 0
         for cut in cuts:
@@ -158,18 +165,19 @@ class PremiereXMLGenerator:
             end_frame = timeline_start_frame + duration
 
             clip = ET.SubElement(video_track_1, 'clipitem', id=f"clipitem-{self.clip_item_count}")
-            ET.SubElement(clip, 'masterclipid').text = master_clip_id
-            ET.SubElement(clip, 'name').text = video_path.name
-            ET.SubElement(clip, 'enabled').text = "TRUE"
-            ET.SubElement(clip, 'duration').text = str(total_duration_frames)
-            ET.SubElement(clip, 'rate').extend([
-                ET.Element('timebase', text=str(self.timebase)),
-                ET.Element('ntsc', text=self.ntsc)
-            ])
-            ET.SubElement(clip, 'start').text = str(timeline_start_frame)
-            ET.SubElement(clip, 'end').text = str(end_frame)
-            ET.SubElement(clip, 'in').text = str(in_frames)
-            ET.SubElement(clip, 'out').text = str(out_frames)
+            clip.append(self._create_text_elem('masterclipid', master_clip_id))
+            clip.append(self._create_text_elem('name', video_path.name))
+            clip.append(self._create_text_elem('enabled', "TRUE"))
+            clip.append(self._create_text_elem('duration', total_duration_frames))
+            
+            c_rate = ET.SubElement(clip, 'rate')
+            c_rate.append(self._create_text_elem('timebase', self.timebase))
+            c_rate.append(self._create_text_elem('ntsc', self.ntsc))
+            
+            clip.append(self._create_text_elem('start', timeline_start_frame))
+            clip.append(self._create_text_elem('end', end_frame))
+            clip.append(self._create_text_elem('in', in_frames))
+            clip.append(self._create_text_elem('out', out_frames))
             
             file_ref = ET.SubElement(clip, 'file', id=file_id)
             self._add_file_definition(file_ref, video_path, total_duration_frames, is_audio=False)
@@ -179,8 +187,8 @@ class PremiereXMLGenerator:
         # --- Track 2: EMOTION CLUSTERS (Adjustment Layers) ---
         if emotion_clusters:
             video_track_2 = ET.SubElement(video_media_el, 'track')
-            ET.SubElement(video_track_2, 'enabled').text = "TRUE"
-            ET.SubElement(video_track_2, 'locked').text = "FALSE"
+            video_track_2.append(self._create_text_elem('enabled', "TRUE"))
+            video_track_2.append(self._create_text_elem('locked', "FALSE"))
             
             slug_file_id = "file-slug-emotion"
             slug_master_id = "masterclip-slug-emotion"
@@ -194,118 +202,118 @@ class PremiereXMLGenerator:
                 if dur_f <= 0: continue
                 
                 clip = ET.SubElement(video_track_2, 'clipitem', id=f"clipitem-{self.clip_item_count}")
-                ET.SubElement(clip, 'masterclipid').text = slug_master_id
-                ET.SubElement(clip, 'name').text = "emotion_event" # From sample
-                ET.SubElement(clip, 'enabled').text = "TRUE"
-                ET.SubElement(clip, 'duration').text = str(total_duration_frames) # Slug duration arbitrary
+                clip.append(self._create_text_elem('masterclipid', slug_master_id))
+                clip.append(self._create_text_elem('name', "emotion_event"))
+                clip.append(self._create_text_elem('enabled', "TRUE"))
+                clip.append(self._create_text_elem('duration', total_duration_frames))
                 
-                ET.SubElement(clip, 'rate').extend([
-                    ET.Element('timebase', text=str(self.timebase)),
-                    ET.Element('ntsc', text=self.ntsc)
-                ])
+                c_rate = ET.SubElement(clip, 'rate')
+                c_rate.append(self._create_text_elem('timebase', self.timebase))
+                c_rate.append(self._create_text_elem('ntsc', self.ntsc))
                 
-                ET.SubElement(clip, 'start').text = str(start_f)
-                ET.SubElement(clip, 'end').text = str(end_f)
-                ET.SubElement(clip, 'in').text = "0"
-                ET.SubElement(clip, 'out').text = str(dur_f)
+                clip.append(self._create_text_elem('start', start_f))
+                clip.append(self._create_text_elem('end', end_f))
+                clip.append(self._create_text_elem('in', "0"))
+                clip.append(self._create_text_elem('out', dur_f))
                 
                 # Slug File Definition
                 file_ref = ET.SubElement(clip, 'file', id=slug_file_id)
                 
                 if slug_file_id not in self.defined_file_ids:
-                    ET.SubElement(file_ref, 'name').text = "Black Video" # Standard slug name
-                    ET.SubElement(file_ref, 'mediaSource').text = "Slug" # CRITICAL for AL behavior
-                    ET.SubElement(file_ref, 'rate').extend([
-                        ET.Element('timebase', text=str(self.timebase)),
-                        ET.Element('ntsc', text=self.ntsc)
-                    ])
-                    # Standard timecode for slugs
-                    tc = ET.SubElement(file_ref, 'timecode')
-                    ET.SubElement(tc, 'rate').extend([
-                        ET.Element('timebase', text=str(self.timebase)),
-                        ET.Element('ntsc', text=self.ntsc)
-                    ])
-                    ET.SubElement(tc, 'string').text = "00:00:00:00"
-                    ET.SubElement(tc, 'frame').text = "0"
-                    ET.SubElement(tc, 'displayformat').text = "DF" # Drop Frame often standard for slugs
+                    file_ref.append(self._create_text_elem('name', "Black Video"))
+                    file_ref.append(self._create_text_elem('mediaSource', "Slug"))
                     
-                    # Slug Media Definition
+                    fr = ET.SubElement(file_ref, 'rate')
+                    fr.append(self._create_text_elem('timebase', self.timebase))
+                    fr.append(self._create_text_elem('ntsc', self.ntsc))
+                    
+                    file_ref.append(self._create_text_elem('duration', total_duration_frames))
+                    
+                    # Timecode
+                    tc = ET.SubElement(file_ref, 'timecode')
+                    tr = ET.SubElement(tc, 'rate')
+                    tr.append(self._create_text_elem('timebase', self.timebase))
+                    tr.append(self._create_text_elem('ntsc', self.ntsc))
+                    tc.append(self._create_text_elem('string', "00:00:00:00"))
+                    tc.append(self._create_text_elem('frame', "0"))
+                    tc.append(self._create_text_elem('displayformat', "DF"))
+                    
+                    # Media Def
                     m = ET.SubElement(file_ref, 'media')
                     v = ET.SubElement(m, 'video')
                     s = ET.SubElement(v, 'samplecharacteristics')
-                    ET.SubElement(s, 'rate').extend([
-                        ET.Element('timebase', text=str(self.timebase)),
-                        ET.Element('ntsc', text=self.ntsc)
-                    ])
-                    ET.SubElement(s, 'width').text = str(self.settings.VIDEO_WIDTH)
-                    ET.SubElement(s, 'height').text = str(self.settings.VIDEO_HEIGHT)
-                    ET.SubElement(s, 'anamorphic').text = "FALSE"
-                    ET.SubElement(s, 'pixelaspectratio').text = "square"
-                    ET.SubElement(s, 'fielddominance').text = "none"
+                    
+                    sr = ET.SubElement(s, 'rate')
+                    sr.append(self._create_text_elem('timebase', self.timebase))
+                    sr.append(self._create_text_elem('ntsc', self.ntsc))
+                    
+                    s.append(self._create_text_elem('width', self.settings.VIDEO_WIDTH))
+                    s.append(self._create_text_elem('height', self.settings.VIDEO_HEIGHT))
+                    s.append(self._create_text_elem('anamorphic', "FALSE"))
+                    s.append(self._create_text_elem('pixelaspectratio', "square"))
+                    s.append(self._create_text_elem('fielddominance', "none"))
                     
                     self.defined_file_ids.add(slug_file_id)
                 
-                # Add Label (Teal)
+                # Add Label
                 labels = ET.SubElement(clip, 'labels')
-                ET.SubElement(labels, 'label2').text = "Teal"
-
+                labels.append(self._create_text_elem('label2', "Teal"))
 
         # === AUDIO ===
-        # ... (Standard Audio Logic from previous implementation) ...
         audio_media_el = ET.SubElement(media_el, 'audio')
-        ET.SubElement(audio_media_el, 'numOutputChannels').text = "2"
+        audio_media_el.append(self._create_text_elem('numOutputChannels', "2"))
         fmt = ET.SubElement(audio_media_el, 'format')
         s = ET.SubElement(fmt, 'samplecharacteristics')
-        ET.SubElement(s, 'depth').text = "16"
-        ET.SubElement(s, 'samplerate').text = "48000"
+        s.append(self._create_text_elem('depth', "16"))
+        s.append(self._create_text_elem('samplerate', "48000"))
         
         # Audio Tracks 1 & 2
         for i in range(1, 3):
             t = ET.SubElement(audio_media_el, 'track')
-            ET.SubElement(t, 'enabled').text = "TRUE"
-            ET.SubElement(t, 'locked').text = "FALSE"
-            ET.SubElement(t, 'outputchannelindex').text = str(i)
+            t.append(self._create_text_elem('enabled', "TRUE"))
+            t.append(self._create_text_elem('locked', "FALSE"))
+            t.append(self._create_text_elem('outputchannelindex', str(i)))
             
-            # If master audio, add clips
             if master_audio_path:
                 self.clip_item_count += 1
                 clip_id = f"clipitem-{self.clip_item_count}"
-                
-                # For linking, we need to know the ID of the other channel's clip.
-                # Since we iterate 1 then 2, we can calculate the IDs.
-                # If i=1, next is +1. If i=2, prev is -1.
                 
                 clip = ET.SubElement(t, 'clipitem', id=clip_id, premiereChannelType="mono")
                 master_clip_id = self._get_master_clip_id(master_audio_path)
                 file_id = self._get_file_id(master_audio_path)
                 
-                ET.SubElement(clip, 'masterclipid').text = master_clip_id
-                ET.SubElement(clip, 'name').text = master_audio_path.name
-                ET.SubElement(clip, 'enabled').text = "TRUE"
-                ET.SubElement(clip, 'duration').text = str(total_duration_frames)
-                ET.SubElement(clip, 'rate').extend([
-                    ET.Element('timebase', text=str(self.timebase)),
-                    ET.Element('ntsc', text=self.ntsc)
-                ])
-                ET.SubElement(clip, 'start').text = "0"
-                ET.SubElement(clip, 'end').text = str(total_duration_frames)
-                ET.SubElement(clip, 'in').text = "0"
-                ET.SubElement(clip, 'out').text = str(total_duration_frames)
+                clip.append(self._create_text_elem('masterclipid', master_clip_id))
+                clip.append(self._create_text_elem('name', master_audio_path.name))
+                clip.append(self._create_text_elem('enabled', "TRUE"))
+                clip.append(self._create_text_elem('duration', total_duration_frames))
+                
+                cr = ET.SubElement(clip, 'rate')
+                cr.append(self._create_text_elem('timebase', self.timebase))
+                cr.append(self._create_text_elem('ntsc', self.ntsc))
+                
+                clip.append(self._create_text_elem('start', "0"))
+                clip.append(self._create_text_elem('end', total_duration_frames))
+                clip.append(self._create_text_elem('in', "0"))
+                clip.append(self._create_text_elem('out', total_duration_frames))
                 
                 f = ET.SubElement(clip, 'file', id=file_id)
                 self._add_file_definition(f, master_audio_path, total_duration_frames, is_audio=True)
                 
-                ET.SubElement(clip, 'sourcetrack').text = "1" # Source is stereo, but treated as mono tracks
-                
-                # Link Logic (Simplified for stereo pair)
-                # In a robust system, we'd track IDs. For now, assuming uniform creation order:
-                # Track 1 clip is ID X. Track 2 clip is ID X+1.
-                
-        # Write File
+                clip.append(self._create_text_elem('sourcetrack', "1"))
+
+        # --- Safe Write using ET.indent (Python 3.9+) ---
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        xml_str = minidom.parseString(ET.tostring(xmeml)).toprettyxml(indent="  ")
-        xml_lines = [line for line in xml_str.split('\n') if line.strip()]
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(xml_lines))
+        
+        # Pretty print in-place
+        ET.indent(xmeml, space="  ", level=0)
+        
+        # Convert to tree to write with proper declaration
+        tree = ET.ElementTree(xmeml)
+        
+        with open(output_path, 'wb') as f:
+            # Premiere XML Headers
+            f.write(b'<?xml version="1.0" encoding="UTF-8"?>\n')
+            f.write(b'<!DOCTYPE xmeml>\n')
+            tree.write(f, encoding='utf-8', xml_declaration=False)
         
         logger.info(f"✅ Premiere XMEML written to {output_path}")

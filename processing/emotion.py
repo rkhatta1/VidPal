@@ -1,13 +1,15 @@
 # processing/emotion.py
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, Generator
+from typing import Dict, Any, Optional, Generator, List
 import cv2
 import mediapipe as mp
 import numpy as np
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from config import get_settings
+from db.models import EpisodeRepository
+from utils.caching import Cache, compute_file_hash
 
 logger = logging.getLogger(__name__)
 
@@ -16,85 +18,13 @@ JAW_OPEN_NAME = "jawOpen"
 MOUTH_SMILE_L_NAME = "mouthSmileLeft"
 MOUTH_SMILE_R_NAME = "mouthSmileRight"
 
-# --- MODIFICATION FOR TUNING ---
-# Based on logs, smile scores are high and jaw scores are very low.
+# --- TUNED THRESHOLDS ---
 SMILE_THRESHOLD = 0.5
-JAW_OPEN_THRESHOLD = 0.05  # Lowered from 0.3
-# --- END MODIFICATION ---
-
-# How many frames per second to analyze.
-DEFAULT_SAMPLE_RATE = 2.0
-FACE_DETECTION_CONFIDENCE = 0.5
-# Low threshold to log potential values for tuning
+JAW_OPEN_THRESHOLD = 0.05
 VERBOSE_LOG_THRESHOLD = 0.05
 
-
-def cluster_emotion_events(
-events: List[Dict[str, Any]],
-window_seconds: float = 30.0,
-min_events: int = 4
-) -> List[Dict[str, float]]:
-"""
-Clusters emotion events based on density (e.g., 4 events within 30s).
-Returns a list of ranges: [{'start': 126.0, 'end': 142.5}, ...]
-"""
-    if not events:
-        return []
-
-    # Sort by timestamp
-    sorted_events = sorted(events, key=lambda x: x['timestamp'])
-    
-    raw_clusters = []
-    
-    # 1. Identify dense windows
-    # We iterate through every event and treat it as the potential 'start' of a window
-    for i in range(len(sorted_events)):
-        current_window_start = sorted_events[i]['timestamp']
-        current_window_end = current_window_start + window_seconds
-        
-        # Find all events in this 30s window
-        window_events = [
-            e['timestamp'] 
-            for e in sorted_events[i:] 
-            if e['timestamp'] <= current_window_end
-        ]
-        
-        # If threshold met, create a tentative cluster from First to Last event in window
-        if len(window_events) >= min_events:
-            raw_clusters.append({
-                'start': window_events[0],
-                'end': window_events[-1]
-            })
-
-    if not raw_clusters:
-        return []
-
-    # 2. Merge overlapping clusters
-    merged = []
-    if raw_clusters:
-        # Sort by start time
-        raw_clusters.sort(key=lambda x: x['start'])
-        
-        current_start = raw_clusters[0]['start']
-        current_end = raw_clusters[0]['end']
-        
-        for i in range(1, len(raw_clusters)):
-            next_start = raw_clusters[i]['start']
-            next_end = raw_clusters[i]['end']
-            
-            # If next cluster starts before (or exactly when) current ends, merge them
-            if next_start <= current_end:
-                current_end = max(current_end, next_end)
-            else:
-                # Push current and start new
-                merged.append({'start': current_start, 'end': current_end})
-                current_start = next_start
-                current_end = next_end
-        
-        # Append final cluster
-        merged.append({'start': current_start, 'end': current_end})
-            
-    return merged
+DEFAULT_SAMPLE_RATE = 2.0
+FACE_DETECTION_CONFIDENCE = 0.5
 
 
 class EmotionDetector:
@@ -103,37 +33,39 @@ class EmotionDetector:
     emotional reactions (e.g., laughter) based on blendshapes.
     """
     
-    def __init__(self, sample_rate: float = DEFAULT_SAMPLE_RATE):
+    def __init__(
+        self, 
+        sample_rate: float = DEFAULT_SAMPLE_RATE,
+        cache: Optional[Cache] = None
+    ):
         self.settings = get_settings()
         self.sample_rate = sample_rate
         self.frame_interval = 1.0 / self.sample_rate
+        self.cache = cache
         
         self.model_path = Path("models/face_landmarker.task")
         
+        # Initialize options as None
+        self.detector_options = None
+        
         if not self.model_path.exists():
-            logger.error(f"MediaPipe model not found at {self.model_path}")
-            logger.error("Please download 'face_landmarker_v2_with_blendshapes.task' and place it in the 'models/' directory.")
-            raise FileNotFoundError(str(self.model_path))
+            logger.warning(f"MediaPipe model not found at {self.model_path}. Emotion detection will fail if called.")
+            return
 
         try:
-            # --- MODIFICATION FOR GPU ---
+            # Configure Delegate
             delegate = python.BaseOptions.Delegate.CPU
             if self.settings.USE_GPU:
                 logger.info("Attempting to set MediaPipe delegate to GPU...")
                 try:
                     delegate = python.BaseOptions.Delegate.GPU
-                    logger.info("MediaPipe delegate set to GPU.")
                 except Exception as e:
-                    logger.warning(f"Failed to set MediaPipe GPU delegate, falling back to CPU: {e}")
-                    delegate = python.BaseOptions.Delegate.CPU
-            else:
-                 logger.info("MediaPipe delegate set to CPU (as per settings).")
-                 
+                    logger.warning(f"Failed to set GPU delegate: {e}")
+
             base_options = python.BaseOptions(
                 model_asset_path=str(self.model_path),
-                delegate=delegate # <-- APPLIED DELEGATE
+                delegate=delegate
             )
-            # --- END MODIFICATION ---
 
             self.detector_options = vision.FaceLandmarkerOptions(
                 base_options=base_options,
@@ -142,45 +74,67 @@ class EmotionDetector:
                 num_faces=self.settings.MAX_SPEAKERS,
                 min_face_detection_confidence=FACE_DETECTION_CONFIDENCE,
             )
-            
-            logger.info(f"✅ MediaPipe EmotionDetector class initialized (options ready, model: {self.model_path.name})")
+            logger.info(f"✅ MediaPipe EmotionDetector initialized (model: {self.model_path.name})")
             
         except Exception as e:
             logger.error(f"Failed to create MediaPipe options: {e}")
-            raise
 
     def detect_emotions(
         self,
         video_path: Path,
         camera_id: str,
+        episode_id: Optional[str] = None,
         duration_limit_seconds: Optional[int] = None,
         verbose_log: bool = False
     ) -> Generator[Dict[str, Any], None, None]:
         """
-        Analyzes a single video file and yields ReactionEvent dictionaries
-        for each detected emotional event.
+        Analyzes a video file and yields ReactionEvent dictionaries.
+        Checks DB and Cache before processing.
         """
-        logger.info(f"Starting emotion detection for: {camera_id} (Sample rate: {self.sample_rate} FPS)")
+        
+        # 1. Check Database
+        if episode_id:
+            db_events = EpisodeRepository.get_reaction_events(episode_id, camera_id)
+            if db_events:
+                logger.info(f"✅ Found {len(db_events)} emotion events in DB for {camera_id}")
+                for event in db_events:
+                    yield event
+                return
+
+        # 2. Check Cache
+        cache_key = None
+        if self.cache and self.settings.ENABLE_CACHING:
+            file_hash = compute_file_hash(video_path)
+            # Key includes params that affect output
+            cache_key = f"emotion_{file_hash}_{duration_limit_seconds}_{self.sample_rate}"
+            cached_events = self.cache.get(cache_key, "emotion_detection")
+            
+            if cached_events is not None:
+                logger.info(f"✅ Found {len(cached_events)} emotion events in Cache for {camera_id}")
+                for event in cached_events:
+                    yield event
+                return
+
+        # 3. Process Video (Fallthrough)
+        if not self.detector_options:
+            logger.error("Detector not initialized (missing model?). Skipping.")
+            return
+
+        logger.info(f"Starting emotion detection for: {camera_id}")
 
         try:
             detector = vision.FaceLandmarker.create_from_options(self.detector_options)
-            logger.info(f"Created new detector instance for {camera_id}")
         except Exception as e:
-            logger.error(f"Failed to create detector instance for {camera_id}: {e}")
+            logger.error(f"Failed to create detector instance: {e}")
             return
 
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
-            logger.error(f"Could not open video file: {video_path}")
-            detector.close()
+            logger.error(f"Could not open video: {video_path}")
             return
 
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps == 0:
-            logger.warning(f"Could not get FPS for {camera_id}, using 30.0")
-            fps = 30.0
-            
         last_processed_time = -self.frame_interval
+        collected_events = [] # To save to cache later
         
         while cap.isOpened():
             ret, frame = cap.read()
@@ -190,7 +144,6 @@ class EmotionDetector:
             current_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
 
             if duration_limit_seconds and current_time > duration_limit_seconds:
-                logger.info(f"Reached duration limit of {duration_limit_seconds}s for {camera_id}")
                 break
 
             if (current_time - last_processed_time) < self.frame_interval:
@@ -209,17 +162,24 @@ class EmotionDetector:
                     detection_result,
                     current_time,
                     camera_id,
-                    verbose_log=verbose_log
+                    verbose_log
                 )
                 
                 if event:
+                    collected_events.append(event)
                     yield event
                     
             except Exception as e:
-                logger.warning(f"MediaPipe detection failed at {current_time:.2f}s for {camera_id}: {e}")
+                if "monotonically increasing" not in str(e):
+                    logger.warning(f"MediaPipe detection error at {current_time:.1f}s: {e}")
 
         detector.close()
         cap.release()
+        
+        # 4. Save to Cache
+        if self.cache and cache_key:
+            self.cache.set(cache_key, "emotion_detection", collected_events)
+            
         logger.info(f"Finished emotion detection for: {camera_id}")
 
     def _parse_blendshapes_for_laughter(
@@ -229,9 +189,6 @@ class EmotionDetector:
         camera_id: str,
         verbose_log: bool = False
     ) -> Optional[Dict[str, Any]]:
-        """
-        Detects laughter using separate thresholds for smile and jaw.
-        """
         if not detection_result.face_blendshapes:
             return None
 
@@ -242,95 +199,84 @@ class EmotionDetector:
             smile_l = categories.get(MOUTH_SMILE_L_NAME, 0.0)
             smile_r = categories.get(MOUTH_SMILE_R_NAME, 0.0)
             
-            if verbose_log and (jaw_open > VERBOSE_LOG_THRESHOLD or smile_l > VERBOSE_LOG_THRESHOLD or smile_r > VERBOSE_LOG_THRESHOLD):
-                logger.info(
-                    f"  [VERBOSE] ts: {timestamp:.2f}s | "
-                    f"cam: {camera_id} | "
-                    f"jaw: {jaw_open:.3f} | "
-                    f"smile_L: {smile_l:.3f} | "
-                    f"smile_R: {smile_r:.3f}"
-                )
+            if verbose_log and (jaw_open > VERBOSE_LOG_THRESHOLD or smile_l > VERBOSE_LOG_THRESHOLD):
+                logger.info(f"  [VERBOSE] {timestamp:.2f}s {camera_id} | Jaw: {jaw_open:.3f} | Smile: {max(smile_l, smile_r):.3f}")
 
-            # --- NEW LOGIC ---
-            is_smiling = (smile_l > SMILE_THRESHOLD or smile_r > SMILE_THRESHOLD)
-            is_jaw_open = (jaw_open > JAW_OPEN_THRESHOLD)
-            
-            is_laughing = is_smiling and is_jaw_open
-            # --- END NEW LOGIC ---
+            is_laughing = (
+                (smile_l > SMILE_THRESHOLD or smile_r > SMILE_THRESHOLD) and
+                (jaw_open > JAW_OPEN_THRESHOLD)
+            )
 
             if is_laughing:
                 return {
                     "timestamp": round(timestamp, 2),
                     "event": "laughter",
                     "camera": camera_id,
-                    "score": round(max(smile_l, smile_r), 3),
-                    "jaw_score": round(jaw_open, 3) # Added for more context
+                    "score": round(max(smile_l, smile_r), 3)
                 }
-                
         return None
 
-# --- Standalone Test Runner (No changes needed here) ---
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    main_logger = logging.getLogger(__name__)
-    main_logger.info("Running EmotionDetector in standalone test mode...")
+    @staticmethod
+    def cluster_emotion_events(
+        events: List[Dict[str, Any]],
+        window_seconds: float = 30.0,
+        min_events: int = 4
+    ) -> List[Dict[str, float]]:
+        """
+        Identifies clusters of 4+ emotion events within any 30-second window.
+        Returns a list of time ranges: [{'start': 120.0, 'end': 150.0}, ...]
+        """
+        if not events:
+            return []
 
-    TEST_DURATION_LIMIT = 900  # 5 minutes
-    
-    # --- SET THIS TO TRUE TO SEE RAW BLENDSHAPE SCORES ---
-    VERBOSE_TESTING = True 
-    # ---
-
-    try:
-        detector = EmotionDetector(sample_rate=DEFAULT_SAMPLE_RATE)
+        # Sort events by time
+        sorted_events = sorted(events, key=lambda x: x['timestamp'])
         
-        settings = get_settings()
-        video_paths = settings.VIDEO_FILES
+        clusters = []
         
-        if not video_paths:
-            main_logger.error("No VIDEO_FILES defined in config.py or .env")
+        # Sliding window approach
+        for i in range(len(sorted_events)):
+            window_start = sorted_events[i]['timestamp']
+            window_end = window_start + window_seconds
+            
+            # Get all events in this window
+            current_window_events = [
+                e for e in sorted_events[i:] 
+                if e['timestamp'] <= window_end
+            ]
+            
+            if len(current_window_events) >= min_events:
+                # We found a dense cluster. Use the actual first and last timestamp.
+                cluster_range = {
+                    'start': current_window_events[0]['timestamp'],
+                    'end': current_window_events[-1]['timestamp']
+                }
+                clusters.append(cluster_range)
+
+        # Merge overlapping clusters
+        if not clusters:
+            return []
+
+        merged_clusters = []
+        clusters.sort(key=lambda x: x['start'])
         
-        main_logger.info(f"Using sample rate: {DEFAULT_SAMPLE_RATE} FPS")
-        if TEST_DURATION_LIMIT:
-            main_logger.info(f"Test duration limit: {TEST_DURATION_LIMIT} seconds per file")
-        if VERBOSE_TESTING:
-            main_logger.info(f"Verbose logging is ON. (Smile: {SMILE_THRESHOLD}, Jaw: {JAW_OPEN_THRESHOLD})")
-
-
-        for camera_id, video_path in video_paths.items():
-            if not video_path.exists():
-                main_logger.warning(f"Video file not found, skipping: {video_path}")
-                continue
+        current_start = clusters[0]['start']
+        current_end = clusters[0]['end']
+        
+        for i in range(1, len(clusters)):
+            next_start = clusters[i]['start']
+            next_end = clusters[i]['end']
             
-            print(f"\n" + "="*60)
-            print(f"🎬 PROCESSING: {camera_id} ({video_path.name})")
-            print("="*60)
-            
-            event_count = 0
-            
-            try:
-                for event in detector.detect_emotions(
-                    video_path,
-                    camera_id,
-                    duration_limit_seconds=TEST_DURATION_LIMIT,
-                    verbose_log=VERBOSE_TESTING
-                ):
-                    print(f"🎉 REACTION DETECTED: {event}")
-                    event_count += 1
-            except Exception as e:
-                main_logger.error(f"Error during detection for {camera_id}: {e}")
-            
-            print(f"--- Finished {camera_id}. Found {event_count} events. ---")
-
-        main_logger.info("✅ Standalone test complete.")
-
-    except FileNotFoundError as e:
-        main_logger.error(f"CRITICAL ERROR: Could not find model file.")
-        main_logger.error("Please download 'face_landmarker_v2_with_blendshapes.task' from MediaPipe's website")
-        main_logger.error("and place it in a 'models/' directory at the project root.")
-    except Exception as e:
-        main_logger.error(f"An unexpected error occurred: {e}", exc_info=True)
+            if next_start <= current_end:
+                # Overlap or continuous: extend the current end
+                current_end = max(current_end, next_end)
+            else:
+                # Gap found: save current and start new
+                merged_clusters.append({'start': current_start, 'end': current_end})
+                current_start = next_start
+                current_end = next_end
+                
+        # Append the last one
+        merged_clusters.append({'start': current_start, 'end': current_end})
+        
+        return merged_clusters
