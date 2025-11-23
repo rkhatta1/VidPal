@@ -1,0 +1,24 @@
+# Heavy Media
+input/
+output/
+.cache/
+__pycache__/
+*.mp4
+*.mov
+*.mp3
+*.wav
+
+# Git
+.git/
+.gitignore
+
+# Environment & Config
+.env
+docker-compose.yml
+README.md
+BACKEND.md
+setup.sh
+
+# Dependencies
+venv/
+env/

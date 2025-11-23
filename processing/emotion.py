@@ -43,7 +43,7 @@ class EmotionDetector:
         self.frame_interval = 1.0 / self.sample_rate
         self.cache = cache
         
-        self.model_path = Path("models/face_landmarker.task")
+        self.model_path = Path(self.settings.FACE_LANDMARKER_PATH).resolve()
         
         # Initialize options as None
         self.detector_options = None

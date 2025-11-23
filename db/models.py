@@ -272,3 +272,16 @@ class EpisodeRepository:
                 "score": row['score']
             })
         return results
+
+    @staticmethod
+    def update_episode_metadata(episode_id: str, new_metadata: Dict[str, Any]) -> None:
+        """Merges new metadata keys into the existing metadata JSON."""
+        with db.get_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE episodes 
+                SET metadata = coalesce(metadata, '{}'::jsonb) || %s
+                WHERE episode_id = %s
+                """,
+                (json.dumps(new_metadata), episode_id)
+            )

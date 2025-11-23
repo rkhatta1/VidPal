@@ -1,14 +1,12 @@
 services:
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: vidpalai_postgres
     environment:
       POSTGRES_USER: vidpalai
       POSTGRES_PASSWORD: vidpalai_secure_2025
       POSTGRES_DB: vidpalai
-      POSTGRES_INITDB_ARGS: "-E UTF8"
     ports:
-      - "5435:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init-db:/docker-entrypoint-initdb.d
@@ -17,8 +15,49 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    restart: unless-stopped
+
+  redis:
+    image: redis:8.0-alpine
+    ports:
+      - "6380:6379"
+
+  api:
+    build: .
+    command: gunicorn --bind 0.0.0.0:5000 api.app:app
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./gcp-key-new.json:/app/gcp-key.json:ro
+      - ./input:/app/data
+    env_file: .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - POSTGRES_HOST=postgres
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/gcp-key.json
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    build: .
+    command: celery -A api.worker.celery_app worker --loglevel=info --concurrency=1
+    env_file: .env
+    volumes:
+      - ./gcp-key-new.json:/app/gcp-key.json:ro
+      - ./input:/app/data
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - POSTGRES_HOST=postgres
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/gcp-key.json
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
 
 volumes:
   postgres_data:
-    driver: local

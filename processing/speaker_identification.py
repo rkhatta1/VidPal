@@ -1,8 +1,6 @@
 # processing/speaker_identification.py (complete with GCS support)
 import logging
 from typing import List, Dict, Any, Tuple, Optional
-import whisperx
-import torch
 from collections import defaultdict
 from pathlib import Path
 import tempfile
@@ -25,7 +23,7 @@ class SpeakerIdentifier:
     def __init__(self, cache: Optional[Cache] = None):
         self.settings = get_settings()
         self.cache = cache
-        self.device = "cuda" if (torch.cuda.is_available() and self.settings.USE_GPU) else "cpu"
+        self.device = "cpu"
         self.compute_type = "float16" if self.device == "cuda" else "int8"
         
         # Initialize Google Cloud Speech client with explicit quota project
@@ -57,10 +55,10 @@ class SpeakerIdentifier:
     ) -> Tuple[List[Dict[str, Any]], Dict[str, str], List[Dict[str, Any]], str]:
         """
         Perform speaker diarization and role mapping.
-        
-        Returns:
-            Tuple of (speaker_segments, role_mapping, full_transcript, cache_key)
         """
+        # Initialize cache_key to None to prevent UnboundLocalError
+        cache_key = None
+
         # Check cache
         if self.cache and self.settings.ENABLE_CACHING:
             file_hash = compute_file_hash(audio_path)
@@ -105,8 +103,14 @@ class SpeakerIdentifier:
         unique_speakers = len(set(s['speaker_id'] for s in speaker_segments))
         logger.info(f"✅ Identified {unique_speakers} speakers in {len(speaker_segments)} segments")
         
-        # Cache results
+        # Cache results (only if cache is enabled and key was generated)
         if self.cache and self.settings.ENABLE_CACHING:
+            # If we skipped the first block, we might need to generate the key now
+            if not cache_key:
+                file_hash = compute_file_hash(audio_path)
+                expected_speakers_val = expected_speakers or self.settings.EXPECTED_SPEAKERS
+                cache_key = f"{file_hash}_{duration_limit_seconds}_{expected_speakers_val}"
+
             self.cache.set(cache_key, "speaker_diarization", {
                 'segments': speaker_segments,
                 'role_mapping': role_mapping,
