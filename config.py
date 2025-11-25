@@ -33,7 +33,8 @@ class Settings(BaseSettings):
     # Local temp dir for downloading files from GCS during processing
     TEMP_DIR: Path = Field(default=Path("/tmp/vidpal_processing"))
     BASE_DIR: Path = Field(default=Path(__file__).resolve().parent)
-    FACE_LANDMARKER_PATH: str = "/app/models/face_landmarker.task"
+    FACE_LANDMARKER_PATH: str = "models/face_landmarker.task"
+    CACHE_DIR: str = ".cache"
     
     FRAME_RATE: float = Field(default=30.0)
     VIDEO_WIDTH: int = Field(default=1920)
@@ -57,12 +58,16 @@ class Settings(BaseSettings):
     
     # ========== LLM Configuration ==========
     REFINE_WITH_LLM: bool = Field(default=True)
-    GEMINI_MODEL: str = Field(default="gemini-1.5-flash") # Faster/Cheaper for editing
+    GEMINI_MODEL: str = Field(default="gemini-2.5-flash")
     
     # ========== RAG ==========
     USE_RAG: bool = Field(default=True)
     EMBEDDING_MODEL: str = Field(default="text-embedding-004")
     EMBEDDING_DIM: int = Field(default=768)
+
+    # ========== MISC ===========
+    WINDOWS_PROJECT_ROOT: str = Field(default="E:/Random/VidPal/LatestTest/Updated")
+    ENABLE_CACHING: bool = Field(default=True)
 
     class Config:
         env_file = ".env"

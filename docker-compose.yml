@@ -29,6 +29,7 @@ services:
     volumes:
       - ./gcp-key-new.json:/app/gcp-key.json:ro
       - ./input:/app/data
+      - ./.cache:/app/.cache
     env_file: .env
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
@@ -48,6 +49,7 @@ services:
     volumes:
       - ./gcp-key-new.json:/app/gcp-key.json:ro
       - ./input:/app/data
+      - ./.cache:/app/.cache
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0

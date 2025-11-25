@@ -19,6 +19,7 @@ from processing.speaker_camera_mapping import SpeakerCameraMapper
 from processing.llm_refiner import LLMRefiner
 from edl.rules import RuleBasedEDLGenerator
 from fcpxml.premiere_xml_generator import PremiereXMLGenerator
+from utils.caching import Cache
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +27,12 @@ class VidPalAIPipeline:
     def __init__(self):
         self.settings = get_settings()
         self.storage_client = storage.Client(project=self.settings.GOOGLE_CLOUD_PROJECT)
+        self.cache = Cache(cache_dir=self.settings.CACHE_DIR)
         
         # Components
         self.rag_store = PGVectorRAGStore() if self.settings.USE_RAG else None
-        self.speaker_identifier = SpeakerIdentifier(cache=None) # Cache handled by DB mostly now
-        self.emotion_detector = EmotionDetector()
+        self.speaker_identifier = SpeakerIdentifier(cache=self.cache) # Cache handled by DB mostly now
+        self.emotion_detector = EmotionDetector(cache=self.cache)
         self.speaker_camera_mapper = SpeakerCameraMapper()
         self.llm_refiner = LLMRefiner(rag_store=self.rag_store) if self.settings.REFINE_WITH_LLM else None
         
