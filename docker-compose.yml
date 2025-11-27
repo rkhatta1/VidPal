@@ -42,6 +42,25 @@ services:
       redis:
         condition: service_started
 
+  whisper-service:
+    build: ./whisper_service
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount GCP credentials for GCS access
+      - ./gcp-key-new.json:/app/gcp-key.json:ro 
+      - ./input:/app/data
+      # Persist HuggingFace cache to avoid re-downloading models on restart
+      - ./models_cache:/root/.cache/huggingface 
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/gcp-key.json
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - count: 1
+              capabilities: [gpu]
+
   worker:
     build: .
     command: celery -A api.worker.celery_app worker --loglevel=info --concurrency=1
@@ -55,10 +74,14 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - POSTGRES_HOST=postgres
       - GOOGLE_APPLICATION_CREDENTIALS=/app/gcp-key.json
+      - WHISPER_SERVICE_URL=http://whisper-service:8000
+      - HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_started
+      whisper-service:
         condition: service_started
 
 volumes:

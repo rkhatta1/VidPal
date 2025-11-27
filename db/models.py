@@ -285,3 +285,108 @@ class EpisodeRepository:
                 """,
                 (json.dumps(new_metadata), episode_id)
             )
+
+
+    @staticmethod
+    def save_sync_result(episode_id: str, sync_result: 'SyncResult') -> None:
+        """Save sync result and file offsets to database."""
+        from processing.sync.models import SyncResult  # Avoid circular import
+        
+        with db.get_cursor() as cursor:
+            # Upsert episode_sync
+            cursor.execute(
+                """
+                INSERT INTO episode_sync 
+                (episode_id, master_file_id, global_start, global_end, 
+                 common_start, common_end, has_full_overlap, sync_method)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (episode_id) DO UPDATE SET
+                    master_file_id = EXCLUDED.master_file_id,
+                    global_start = EXCLUDED.global_start,
+                    global_end = EXCLUDED.global_end,
+                    common_start = EXCLUDED.common_start,
+                    common_end = EXCLUDED.common_end,
+                    has_full_overlap = EXCLUDED.has_full_overlap,
+                    sync_method = EXCLUDED.sync_method
+                """,
+                (
+                    episode_id,
+                    sync_result.master_file_id,
+                    sync_result.global_start,
+                    sync_result.global_end,
+                    sync_result.common_start,
+                    sync_result.common_end,
+                    sync_result.has_full_overlap,
+                    'cross_correlation',
+                )
+            )
+            
+            # Delete old offsets
+            cursor.execute(
+                "DELETE FROM file_sync_offsets WHERE episode_id = %s",
+                (episode_id,)
+            )
+            
+            # Insert file offsets
+            for file_id, offset in sync_result.file_offsets.items():
+                cursor.execute(
+                    """
+                    INSERT INTO file_sync_offsets
+                    (episode_id, file_id, offset_seconds, global_in_point, 
+                     global_out_point, original_duration, sync_confidence, is_master)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        episode_id,
+                        file_id,
+                        offset.offset_seconds,
+                        offset.global_in_point,
+                        offset.global_out_point,
+                        offset.original_duration,
+                        offset.sync_confidence,
+                        offset.is_master,
+                    )
+                )
+
+    @staticmethod
+    def get_sync_result(episode_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve sync result from database."""
+        with db.get_cursor() as cursor:
+            # Get main sync record
+            cursor.execute(
+                "SELECT * FROM episode_sync WHERE episode_id = %s",
+                (episode_id,)
+            )
+            sync_row = cursor.fetchone()
+            
+            if not sync_row:
+                return None
+            
+            # Get file offsets
+            cursor.execute(
+                "SELECT * FROM file_sync_offsets WHERE episode_id = %s",
+                (episode_id,)
+            )
+            offset_rows = cursor.fetchall()
+            
+            file_offsets = {}
+            for row in offset_rows:
+                file_offsets[row['file_id']] = {
+                    "file_id": row['file_id'],
+                    "file_path": "",  # Not stored in DB, will be populated at runtime
+                    "original_duration": row['original_duration'],
+                    "offset_seconds": row['offset_seconds'],
+                    "global_in_point": row['global_in_point'],
+                    "global_out_point": row['global_out_point'],
+                    "sync_confidence": row['sync_confidence'],
+                }
+            
+            return {
+                "master_file_id": sync_row['master_file_id'],
+                "file_offsets": file_offsets,
+                "global_start": sync_row['global_start'],
+                "global_end": sync_row['global_end'],
+                "common_start": sync_row['common_start'],
+                "common_end": sync_row['common_end'],
+                "has_full_overlap": sync_row['has_full_overlap'],
+            }

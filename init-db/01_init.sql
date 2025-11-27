@@ -152,6 +152,57 @@ CREATE INDEX idx_vlm_descriptions_embedding ON vlm_descriptions
     USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
 
+-- ========== Sync Module Tables ==========
+
+-- Store sync results per episode
+CREATE TABLE IF NOT EXISTS episode_sync (
+    id SERIAL PRIMARY KEY,
+    episode_id VARCHAR(255) NOT NULL REFERENCES episodes(episode_id) ON DELETE CASCADE,
+    master_file_id VARCHAR(100) NOT NULL,
+    
+    -- Global timeline bounds
+    global_start FLOAT NOT NULL DEFAULT 0.0,
+    global_end FLOAT NOT NULL,
+    
+    -- Common range (all files overlap)
+    common_start FLOAT NOT NULL,
+    common_end FLOAT NOT NULL,
+    
+    -- Processing metadata
+    has_full_overlap BOOLEAN DEFAULT FALSE,
+    sync_method VARCHAR(50) DEFAULT 'cross_correlation',
+    
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    UNIQUE(episode_id)
+);
+
+-- Store per-file offset information
+CREATE TABLE IF NOT EXISTS file_sync_offsets (
+    id SERIAL PRIMARY KEY,
+    episode_id VARCHAR(255) NOT NULL REFERENCES episodes(episode_id) ON DELETE CASCADE,
+    file_id VARCHAR(100) NOT NULL,  -- camera_id or "master_audio"
+    
+    -- Timing data
+    offset_seconds FLOAT NOT NULL,  -- Offset from master
+    global_in_point FLOAT NOT NULL,
+    global_out_point FLOAT NOT NULL,
+    original_duration FLOAT NOT NULL,
+    
+    -- Quality metrics
+    sync_confidence FLOAT DEFAULT 1.0,
+    
+    -- Is this the master file?
+    is_master BOOLEAN DEFAULT FALSE,
+    
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    UNIQUE(episode_id, file_id)
+);
+
+CREATE INDEX idx_file_sync_episode ON file_sync_offsets(episode_id);
+CREATE INDEX idx_episode_sync_episode ON episode_sync(episode_id);
+
 -- ========== Utility Functions ==========
 
 -- Update timestamp trigger

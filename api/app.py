@@ -34,38 +34,52 @@ def start_processing():
     """
     Expects JSON:
     {
-        "episode_id": "optional-uuid", (or generated)
+        "episode_id": "optional-uuid",
         "title": "My Podcast",
-        "audio_url": "gs://bucket/audio.mp3",
+        "audio_url": "gs://bucket/audio.mp3",  // OPTIONAL now
         "video_urls": {
-            "cam_a": "gs://bucket/cam1.mp4",
-            "cam_b": "gs://bucket/cam2.mp4"
+            "cam_wide": "gs://bucket/cam1.mp4",
+            "cam_host": "gs://bucket/cam2.mp4"
+        },
+        "sync_options": {
+            "enabled": true,
+            "master_file_id": "cam_wide"  // Audio extracted from here if audio_url is null
         }
     }
     """
     data = request.json
-    if not data or 'audio_url' not in data or 'video_urls' not in data:
-        return jsonify({"error": "Missing audio_url or video_urls"}), 400
+    
+    # video_urls is always required
+    if not data or 'video_urls' not in data:
+        return jsonify({"error": "Missing video_urls"}), 400
+    
+    if not data['video_urls']:
+        return jsonify({"error": "video_urls cannot be empty"}), 400
 
+    # audio_url is now optional
+    audio_url = data.get('audio_url')  # Can be None
+    
     episode_id = data.get('episode_id') or str(uuid.uuid4())
     
-    # Initial DB entry to track state immediately
     try:
         EpisodeRepository.create_episode(
             episode_id=episode_id,
             title=data.get('title', 'Untitled'),
-            audio_path=data['audio_url']
+            audio_path=audio_url  # Can be None initially
         )
     except Exception as e:
         logger.error(f"DB Error: {e}")
         return jsonify({"error": "Database initialization failed"}), 500
 
-    # Trigger Celery Task
-    # We import the task via name string to avoid circular imports here, 
-    # or define shared task module. For simplicity:
     task = celery_app.send_task(
         'worker.run_pipeline',
-        args=[episode_id, data['audio_url'], data['video_urls'], data.get('title')]
+        args=[
+            episode_id,
+            audio_url,  # Can be None
+            data['video_urls'],
+            data.get('title'),
+            data.get('sync_options'),
+        ]
     )
     
     return jsonify({

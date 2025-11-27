@@ -41,12 +41,20 @@ class Settings(BaseSettings):
     VIDEO_HEIGHT: int = Field(default=1080)
     
     # ========== Audio/Diarization ==========
+    SPEAKER_IDENTIFICATION_PROVIDER: str = Field(default="local", description="Provider for speaker identification. Either 'local' (Whisper) or 'gcs' (Google Cloud Speech).")
     SPEECH_LANGUAGE_CODE: str = Field(default="en-US")
     # "latest_long" is standard for long-form audio in GCloud
     SPEECH_MODEL: str = Field(default="latest_long") 
     MIN_SPEAKERS: int = Field(default=2)
     MAX_SPEAKERS: int = Field(default=6)
     EXPECTED_SPEAKERS: int = Field(default=3)
+
+    @field_validator('SPEAKER_IDENTIFICATION_PROVIDER')
+    def validate_speaker_provider(cls, v):
+        if v not in ['local', 'gcs']:
+            raise ValueError("SPEAKER_IDENTIFICATION_PROVIDER must be 'local' or 'gcs'")
+        return v
+
 
     # ========== EDL Rules ==========
     MIN_SHOT_DURATION: float = Field(default=2.0)
@@ -56,6 +64,9 @@ class Settings(BaseSettings):
         "laugh", "haha", "wow", "no way", "amazing", "oh my god"
     ])
     
+    # ========== WhisperX Service ==========
+    WHISPER_SERVICE_URL: str = Field(default="http://whisper-service:8000")
+    HUGGINGFACE_TOKEN: str = Field(...) # Required for Pyannote inside WhisperX
     # ========== LLM Configuration ==========
     REFINE_WITH_LLM: bool = Field(default=True)
     GEMINI_MODEL: str = Field(default="gemini-2.5-flash")

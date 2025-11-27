@@ -1,6 +1,7 @@
 # edl/rules.py
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
+from processing.sync.models import SyncResult
 import logging
 
 logger = logging.getLogger(__name__)
@@ -92,113 +93,106 @@ class RuleBasedEDLGenerator:
         transcript: Optional[List[Dict[str, Any]]] = None,
         start_time: float = 0.0,
         end_time: Optional[float] = None,
+        sync_result: Optional[SyncResult] = None,  # NEW PARAMETER
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Generate rule-based EDL from speaker segments
-        using the new simplified logic:
-        1. Start wide.
-        2. On speaker change:
-           - Cut to cam_wide for 5 seconds.
-           - If speaker's segment is > 20s, switch to their close-up.
-           - Otherwise, stay on cam_wide.
+        Generate rule-based EDL from speaker segments.
+        Now sync-aware: checks camera availability at each timestamp.
         """
         if end_time is None:
-            end_time = max(seg['end'] for seg in speaker_segments)
+            if speaker_segments:
+                end_time = max(seg['end'] for seg in speaker_segments)
+            else:
+                end_time = start_time + 60.0  # Default 1 minute
         
         logger.info(f"Generating EDL for {start_time:.1f}s - {end_time:.1f}s")
         
-        # Get default wide cam
         wide_cam = role_camera_map.get("default_wide", "cam_wide")
-        
-        # --- NEW SIMPLIFIED LOGIC ---
+        all_cameras = list(set(role_camera_map.values()) - {"default_wide"})
+        if wide_cam not in all_cameras:
+            all_cameras.append(wide_cam)
         
         cuts = []
         
-        # Rule 1: Start with a wide shot
-        opening_duration = min(self.wide_open_s, end_time)
+        # Rule 1: Opening wide shot
+        opening_duration = min(self.wide_open_s, end_time - start_time)
         if opening_duration > 0:
-            cuts.append(Cut(start_time, opening_duration, wide_cam, "opening"))
+            opening_cam = self._get_available_camera(
+                wide_cam, start_time, sync_result, all_cameras, wide_cam
+            )
+            cuts.append(Cut(start_time, start_time + opening_duration, opening_cam, "opening"))
         
         # Rule 2: Process speaker segments
-        
-        # Define thresholds from user request
         STAY_WIDE_DURATION_S = 5.0
         LONG_SHOT_THRESHOLD_S = 20.0
         
-        last_speaker_id = None
-        
-        for i, seg in enumerate(speaker_segments):
-            seg_start = max(seg['start'], opening_duration) # Don't overlap opening
+        for seg in speaker_segments:
+            seg_start = max(seg['start'], start_time + opening_duration)
             seg_end = min(seg['end'], end_time)
             
             if seg_end <= seg_start:
                 continue
 
             role = role_mapping.get(seg['speaker_id'], 'unknown')
-            camera = role_camera_map.get(role, wide_cam)
+            preferred_camera = role_camera_map.get(role, wide_cam)
             segment_duration = seg_end - seg_start
             
-            # --- Apply the new rules ---
+            # Wide intro
+            wide_shot_end = min(seg_start + STAY_WIDE_DURATION_S, seg_end)
             
-            # Always start with cam_wide when a speaker *starts*
-            wide_shot_end_time = min(seg_start + STAY_WIDE_DURATION_S, seg_end)
+            # Get available camera for wide shot
+            actual_wide_cam = self._get_available_camera(
+                wide_cam, seg_start, sync_result, all_cameras, wide_cam
+            )
             
             cuts.append(Cut(
                 seg_start,
-                wide_shot_end_time,
-                wide_cam,
+                wide_shot_end,
+                actual_wide_cam,
                 f"wide_intro_{role}"
             ))
             
-            # If the segment is long enough AND they have a dedicated camera,
-            # switch to their close-up after the 5s wide intro.
+            # Long shot: switch to close-up
             if (
                 segment_duration > LONG_SHOT_THRESHOLD_S and
-                camera != wide_cam and
-                wide_shot_end_time < seg_end # Ensure there's time left
+                preferred_camera != wide_cam and
+                wide_shot_end < seg_end
             ):
+                actual_closeup = self._get_available_camera(
+                    preferred_camera, wide_shot_end, sync_result, all_cameras, wide_cam
+                )
                 cuts.append(Cut(
-                    wide_shot_end_time,
+                    wide_shot_end,
                     seg_end,
-                    camera,
+                    actual_closeup,
                     f"long_shot_{role}"
                 ))
-            
-            # If segment is short, or they don't have a close-up (like SPEAKER_03),
-            # just extend the wide shot to the end of their segment.
-            elif wide_shot_end_time < seg_end:
+            elif wide_shot_end < seg_end:
+                # Short segment: stay wide
+                actual_cam = self._get_available_camera(
+                    wide_cam, wide_shot_end, sync_result, all_cameras, wide_cam
+                )
                 cuts.append(Cut(
-                    wide_shot_end_time,
+                    wide_shot_end,
                     seg_end,
-                    wide_cam,
+                    actual_cam,
                     f"short_shot_{role}"
                 ))
 
-            last_speaker_id = seg['speaker_id']
-
-        # --- End of new logic ---
-
         if not cuts:
-            logger.warning("No cuts generated by new logic. Returning full wide shot.")
+            logger.warning("No cuts generated. Returning full wide shot.")
             return {"cuts": [{
                 'start_time': start_time,
                 'end_time': end_time,
                 'camera_id': wide_cam,
             }]}
-            
-        # Step 3: Merge consecutive same-camera shots
+        
         merged = self._merge_consecutive(cuts)
-        
-        # Step 4: Enforce minimum shot duration (helps with tiny gaps)
         merged = self._enforce_min_duration(merged, start_time, end_time)
-        
-        # Step 5: Eliminate gaps
         merged = self._eliminate_gaps(merged, start_time, end_time)
-        
-        # Step 6: Round to frames and validate
         final = self._round_and_validate(merged, start_time, end_time)
         
-        logger.info(f"✅ Generated {len(final)} cuts using new simplified logic")
+        logger.info(f"✅ Generated {len(final)} cuts")
         return {"cuts": final}
     
     def _build_turns(
@@ -431,3 +425,40 @@ class RuleBasedEDLGenerator:
                 last_end = e
         
         return result
+
+    def _get_available_camera(
+        self,
+        preferred_camera: str,
+        timestamp: float,
+        sync_result: Optional[SyncResult],
+        all_cameras: List[str],
+        wide_cam: str,
+    ) -> str:
+        """
+        Get the best available camera at a given timestamp.
+        Falls back if preferred camera doesn't have footage.
+        """
+        if sync_result is None:
+            return preferred_camera
+        
+        # Check if preferred camera is available
+        available = sync_result.get_available_files_at(timestamp)
+        
+        # Filter to only include actual cameras (not master_audio)
+        available_cameras = [c for c in available if c in all_cameras]
+        
+        if preferred_camera in available_cameras:
+            return preferred_camera
+        
+        # Fallback: wide cam if available, else first available
+        if wide_cam in available_cameras:
+            return wide_cam
+        
+        if available_cameras:
+            return available_cameras[0]
+        
+        # Last resort: return preferred (will be handled by XML generator)
+        logger.warning(
+            f"No cameras available at {timestamp:.2f}s, using {preferred_camera}"
+        )
+        return preferred_camera

@@ -1,0 +1,6 @@
+fastapi>=0.100.0
+uvicorn>=0.23.0
+python-multipart>=0.0.6
+whisperx>=3.7.4
+google-cloud-storage>=2.10.0
+pydantic>=2.0.0
