@@ -68,3 +68,5 @@ gcp-*.json
 STATE-*.md
 cuda-*
 models_cache
+errors/
+*.xml

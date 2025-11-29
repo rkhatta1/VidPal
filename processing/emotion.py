@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Generator, List
 import cv2
 import mediapipe as mp
-import numpy as np
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from config import get_settings
@@ -45,18 +44,15 @@ class EmotionDetector:
         
         self.model_path = Path(self.settings.FACE_LANDMARKER_PATH).resolve()
         
-        # Initialize options as None
         self.detector_options = None
         
         if not self.model_path.exists():
-            logger.warning(f"MediaPipe model not found at {self.model_path}. Emotion detection will fail if called.")
+            logger.warning(f"MediaPipe model not found at {self.model_path}. Emotion detection will fail.")
             return
 
         try:
-            # Configure Delegate
             delegate = python.BaseOptions.Delegate.CPU
             if self.settings.USE_GPU:
-                logger.info("Attempting to set MediaPipe delegate to GPU...")
                 try:
                     delegate = python.BaseOptions.Delegate.GPU
                 except Exception as e:
@@ -74,7 +70,7 @@ class EmotionDetector:
                 num_faces=self.settings.MAX_SPEAKERS,
                 min_face_detection_confidence=FACE_DETECTION_CONFIDENCE,
             )
-            logger.info(f"✅ MediaPipe EmotionDetector initialized (model: {self.model_path.name})")
+            logger.info(f"✅ MediaPipe EmotionDetector initialized")
             
         except Exception as e:
             logger.error(f"Failed to create MediaPipe options: {e}")
@@ -84,43 +80,50 @@ class EmotionDetector:
         video_path: Path,
         camera_id: str,
         episode_id: Optional[str] = None,
-        duration_limit_seconds: Optional[int] = None,
+        duration_limit_seconds: Optional[int] = None, # Legacy, kept for compatibility
+        start_time: float = 0.0,  # NEW
+        end_time: Optional[float] = None, # NEW
         verbose_log: bool = False
     ) -> Generator[Dict[str, Any], None, None]:
         """
         Analyzes a video file and yields ReactionEvent dictionaries.
-        Checks DB and Cache before processing.
+        Supports start/end time for sync-aware processing.
         """
         
-        # 1. Check Database
+        # 1. Check Database (Return everything, filtering happens in generator if needed, 
+        # but usually DB store is "truth")
         if episode_id:
             db_events = EpisodeRepository.get_reaction_events(episode_id, camera_id)
             if db_events:
                 logger.info(f"✅ Found {len(db_events)} emotion events in DB for {camera_id}")
                 for event in db_events:
-                    yield event
+                    # Filter retrieved events by time window
+                    ts = event['timestamp']
+                    if ts >= start_time and (end_time is None or ts <= end_time):
+                        yield event
                 return
 
         # 2. Check Cache
         cache_key = None
         if self.cache and self.settings.ENABLE_CACHING:
             file_hash = compute_file_hash(video_path)
-            # Key includes params that affect output
-            cache_key = f"emotion_{file_hash}_{duration_limit_seconds}_{self.sample_rate}"
+            # Include start/end in cache key to avoid returning partial results for full run
+            # or use a broader strategy. For now, specific keys are safer.
+            cache_key = f"emotion_{file_hash}_{start_time}_{end_time}_{self.sample_rate}"
             cached_events = self.cache.get(cache_key, "emotion_detection")
             
             if cached_events is not None:
-                logger.info(f"✅ Found {len(cached_events)} emotion events in Cache for {camera_id}")
+                logger.info(f"✅ Found {len(cached_events)} emotion events in Cache")
                 for event in cached_events:
                     yield event
                 return
 
-        # 3. Process Video (Fallthrough)
+        # 3. Process Video
         if not self.detector_options:
-            logger.error("Detector not initialized (missing model?). Skipping.")
+            logger.error("Detector not initialized. Skipping.")
             return
 
-        logger.info(f"Starting emotion detection for: {camera_id}")
+        logger.info(f"Starting emotion detection for {camera_id} ({start_time}-{end_time})")
 
         try:
             detector = vision.FaceLandmarker.create_from_options(self.detector_options)
@@ -134,8 +137,13 @@ class EmotionDetector:
             return
 
         last_processed_time = -self.frame_interval
-        collected_events = [] # To save to cache later
+        collected_events = [] 
         
+        # Fast forward to start_time if possible
+        if start_time > 0:
+            cap.set(cv2.CAP_PROP_POS_MSEC, start_time * 1000)
+            last_processed_time = start_time - self.frame_interval
+
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -143,12 +151,22 @@ class EmotionDetector:
                 
             current_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
 
+            # Stop if we exceeded end_time
+            if end_time and current_time > end_time:
+                break
+            
+            # Stop if legacy duration limit is hit
             if duration_limit_seconds and current_time > duration_limit_seconds:
                 break
 
+            # Skip frames based on sample rate
             if (current_time - last_processed_time) < self.frame_interval:
                 continue
                 
+            # Skip frames before start_time (double check in case seek failed)
+            if current_time < start_time:
+                continue
+
             last_processed_time = current_time
 
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -170,6 +188,7 @@ class EmotionDetector:
                     yield event
                     
             except Exception as e:
+                # Ignore timestamp monotonic errors from mediapipe (happens with seeking)
                 if "monotonically increasing" not in str(e):
                     logger.warning(f"MediaPipe detection error at {current_time:.1f}s: {e}")
 
@@ -200,7 +219,7 @@ class EmotionDetector:
             smile_r = categories.get(MOUTH_SMILE_R_NAME, 0.0)
             
             if verbose_log and (jaw_open > VERBOSE_LOG_THRESHOLD or smile_l > VERBOSE_LOG_THRESHOLD):
-                logger.info(f"  [VERBOSE] {timestamp:.2f}s {camera_id} | Jaw: {jaw_open:.3f} | Smile: {max(smile_l, smile_r):.3f}")
+                logger.debug(f"{timestamp:.2f}s {camera_id} | Jaw: {jaw_open:.3f} | Smile: {max(smile_l, smile_r):.3f}")
 
             is_laughing = (
                 (smile_l > SMILE_THRESHOLD or smile_r > SMILE_THRESHOLD) and
@@ -222,41 +241,33 @@ class EmotionDetector:
         window_seconds: float = 30.0,
         min_events: int = 4
     ) -> List[Dict[str, float]]:
-        """
-        Identifies clusters of 4+ emotion events within any 30-second window.
-        Returns a list of time ranges: [{'start': 120.0, 'end': 150.0}, ...]
-        """
+        """Identifies clusters of emotion events."""
         if not events:
             return []
 
-        # Sort events by time
         sorted_events = sorted(events, key=lambda x: x['timestamp'])
-        
         clusters = []
         
-        # Sliding window approach
         for i in range(len(sorted_events)):
             window_start = sorted_events[i]['timestamp']
             window_end = window_start + window_seconds
             
-            # Get all events in this window
             current_window_events = [
                 e for e in sorted_events[i:] 
                 if e['timestamp'] <= window_end
             ]
             
             if len(current_window_events) >= min_events:
-                # We found a dense cluster. Use the actual first and last timestamp.
                 cluster_range = {
                     'start': current_window_events[0]['timestamp'],
                     'end': current_window_events[-1]['timestamp']
                 }
                 clusters.append(cluster_range)
 
-        # Merge overlapping clusters
         if not clusters:
             return []
 
+        # Merge
         merged_clusters = []
         clusters.sort(key=lambda x: x['start'])
         
@@ -268,15 +279,11 @@ class EmotionDetector:
             next_end = clusters[i]['end']
             
             if next_start <= current_end:
-                # Overlap or continuous: extend the current end
                 current_end = max(current_end, next_end)
             else:
-                # Gap found: save current and start new
                 merged_clusters.append({'start': current_start, 'end': current_end})
                 current_start = next_start
                 current_end = next_end
                 
-        # Append the last one
         merged_clusters.append({'start': current_start, 'end': current_end})
-        
         return merged_clusters

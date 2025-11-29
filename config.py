@@ -1,6 +1,6 @@
 # config.py
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 from pathlib import Path
 from typing import Literal, Optional, Dict
 import os
@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     VIDEO_HEIGHT: int = Field(default=1080)
     
     # ========== Audio/Diarization ==========
-    SPEAKER_IDENTIFICATION_PROVIDER: str = Field(default="local", description="Provider for speaker identification. Either 'local' (Whisper) or 'gcs' (Google Cloud Speech).")
+    SPEAKER_IDENTIFICATION_PROVIDER: str = Field(default="gcs", description="Provider for speaker identification. Either 'local' (Whisper) or 'gcs' (Google Cloud Speech).")
     SPEECH_LANGUAGE_CODE: str = Field(default="en-US")
     # "latest_long" is standard for long-form audio in GCloud
     SPEECH_MODEL: str = Field(default="latest_long") 

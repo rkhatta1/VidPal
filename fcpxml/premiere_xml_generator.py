@@ -1,9 +1,11 @@
-# fcpxml/premiere_xml_generator.py
 import logging
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 import xml.etree.ElementTree as ET
 from config import get_settings
+# Import SyncResult for type hinting (optional, but good practice)
+# We use string forward reference or Any if avoiding circular imports is needed
+from processing.sync.models import SyncResult 
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +99,7 @@ class PremiereXMLGenerator:
         episode_id: str,
         master_audio_path: Optional[Path] = None,
         emotion_clusters: Optional[List[Dict[str, float]]] = None,
+        sync_result: Optional[SyncResult] = None,  # <--- NEW ARGUMENT
     ) -> None:
         logger.info(f"Generating Premiere XMEML with {len(cuts)} cuts...")
         
@@ -152,37 +155,78 @@ class PremiereXMLGenerator:
         video_track_1.append(self._create_text_elem('enabled', "TRUE"))
         video_track_1.append(self._create_text_elem('locked', "FALSE"))
 
-        timeline_start_frame = 0
-        for cut in cuts:
+        # Keep track of where we are on the timeline
+        # (This assumes cuts are contiguous, which they should be from EDL gen)
+        timeline_current_frame = 0
+
+        # Sort cuts to be safe (EDL generator usually returns sorted)
+        sorted_cuts = sorted(cuts, key=lambda c: c['start_time'])
+
+        for cut in sorted_cuts:
             self.clip_item_count += 1
-            video_path = video_paths[cut['camera_id']]
+            camera_id = cut['camera_id']
+            video_path = video_paths[camera_id]
             file_id = self._get_file_id(video_path)
             master_clip_id = self._get_master_clip_id(video_path)
             
-            in_frames = int(cut['start_time'] * self.fps)
-            out_frames = int(cut['end_time'] * self.fps)
-            duration = out_frames - in_frames
-            end_frame = timeline_start_frame + duration
+            # --- SYNC / TIMECODE CALCULATION ---
+            # Global Timeline times (from EDL)
+            global_start = cut['start_time']
+            global_end = cut['end_time']
+            
+            # Source Clip times (Local to the specific video file)
+            if sync_result:
+                offset = sync_result.get_offset(camera_id)
+                if offset:
+                    # offset.global_in_point is "where this file starts on the global timeline"
+                    # So: Local Source Time = Global Time - File Start Time
+                    source_in_sec = global_start - offset.global_in_point
+                    source_out_sec = global_end - offset.global_in_point
+                else:
+                    # Fallback (shouldn't happen if validated)
+                    source_in_sec = global_start
+                    source_out_sec = global_end
+            else:
+                source_in_sec = global_start
+                source_out_sec = global_end
+
+            # Convert to frames
+            in_frames = int(source_in_sec * self.fps)
+            out_frames = int(source_out_sec * self.fps)
+            
+            # Clip duration on timeline
+            clip_duration_frames = int((global_end - global_start) * self.fps)
+            
+            # Ensure coherence (out - in should equal duration)
+            # We enforce duration based on timeline placement
+            out_frames = in_frames + clip_duration_frames
+            
+            end_frame = timeline_current_frame + clip_duration_frames
 
             clip = ET.SubElement(video_track_1, 'clipitem', id=f"clipitem-{self.clip_item_count}")
             clip.append(self._create_text_elem('masterclipid', master_clip_id))
             clip.append(self._create_text_elem('name', video_path.name))
             clip.append(self._create_text_elem('enabled', "TRUE"))
-            clip.append(self._create_text_elem('duration', total_duration_frames))
+            clip.append(self._create_text_elem('duration', total_duration_frames)) # Placeholder max duration usually fine
             
             c_rate = ET.SubElement(clip, 'rate')
             c_rate.append(self._create_text_elem('timebase', self.timebase))
             c_rate.append(self._create_text_elem('ntsc', self.ntsc))
             
-            clip.append(self._create_text_elem('start', timeline_start_frame))
+            # Timeline placement
+            clip.append(self._create_text_elem('start', timeline_current_frame))
             clip.append(self._create_text_elem('end', end_frame))
+            
+            # Source trimming
             clip.append(self._create_text_elem('in', in_frames))
             clip.append(self._create_text_elem('out', out_frames))
             
             file_ref = ET.SubElement(clip, 'file', id=file_id)
+            # For file definition duration, ideally use actual file duration if known, 
+            # otherwise total_duration_frames is a safe fallback for XML validity
             self._add_file_definition(file_ref, video_path, total_duration_frames, is_audio=False)
             
-            timeline_start_frame = end_frame
+            timeline_current_frame = end_frame
 
         # --- Track 2: EMOTION CLUSTERS (Adjustment Layers) ---
         if emotion_clusters:
@@ -200,6 +244,9 @@ class PremiereXMLGenerator:
                 dur_f = end_f - start_f
                 
                 if dur_f <= 0: continue
+                
+                # Make sure we don't start before the timeline (if sync shifted things)
+                if start_f < 0: start_f = 0
                 
                 clip = ET.SubElement(video_track_2, 'clipitem', id=f"clipitem-{self.clip_item_count}")
                 clip.append(self._create_text_elem('masterclipid', slug_master_id))
@@ -273,7 +320,7 @@ class PremiereXMLGenerator:
                 p_scale.append(self._create_text_elem('valuemax', '1000'))
                 p_scale.append(self._create_text_elem('value', '0')) # Scale 0
                 
-                # Rotation (Required defaults)
+                # Rotation
                 p_rot = ET.SubElement(eff, 'parameter', authoringApp='PremierePro')
                 p_rot.append(self._create_text_elem('parameterid', 'rotation'))
                 p_rot.append(self._create_text_elem('name', 'Rotation'))
@@ -281,7 +328,7 @@ class PremiereXMLGenerator:
                 p_rot.append(self._create_text_elem('valuemax', '8640'))
                 p_rot.append(self._create_text_elem('value', '0'))
                 
-                # Center (Required defaults)
+                # Center
                 p_cen = ET.SubElement(eff, 'parameter', authoringApp='PremierePro')
                 p_cen.append(self._create_text_elem('parameterid', 'center'))
                 p_cen.append(self._create_text_elem('name', 'Center'))
@@ -289,7 +336,7 @@ class PremiereXMLGenerator:
                 v_cen.append(self._create_text_elem('horiz', '0'))
                 v_cen.append(self._create_text_elem('vert', '0'))
 
-                # Anchor Point (Required defaults)
+                # Anchor Point
                 p_anc = ET.SubElement(eff, 'parameter', authoringApp='PremierePro')
                 p_anc.append(self._create_text_elem('parameterid', 'centerOffset'))
                 p_anc.append(self._create_text_elem('name', 'Anchor Point'))
