@@ -53,7 +53,17 @@ class LocalSpeakerIdentifier:
             cached = self.cache.get(cache_key, "speaker_diarization")
             if cached:
                 logger.info("✅ Using cached speaker diarization")
-                return cached['segments'], cached['role_mapping'], cached['transcript'], cache_key
+
+                segments = cached['segments']
+                role_mapping = cached['role_mapping']
+                transcript = cached['transcript']
+
+                # Persist diarization to DB for this episode
+                EpisodeRepository.save_speaker_segments(episode_id, segments)
+                speaker_stats = self._calculate_speaker_stats(segments)
+                EpisodeRepository.save_speakers(episode_id, role_mapping, speaker_stats)
+
+                return segments, role_mapping, transcript, cache_key
 
         # --- 3. PREPARE AUDIO ---
         # If local, upload to GCS for the microservice to access

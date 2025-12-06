@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     GOOGLE_CLOUD_LOCATION: str = Field(default="us-central1")
     GCS_BUCKET_NAME: str = Field(...) # Required for processing
     GOOGLE_GENAI_USE_VERTEXAI: bool = Field(default=True)
+    USE_GPU: bool = Field(default=True)
     
     # ========== API Keys (Fallback) ==========
     # If using Vertex AI, these might not be needed if ADC is set up

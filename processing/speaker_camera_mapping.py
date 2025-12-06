@@ -88,6 +88,98 @@ class SpeakerCameraMapper:
             Path(temp_snippet_path).unlink(missing_ok=True)
             return None
 
+
+    def build_manual_snippet_set(
+        self,
+        episode_id: str,
+        speaker_segments: List[Dict[str, Any]],
+        role_mapping: Dict[str, str],
+        video_paths: Dict[str, Path],
+        sync_result: Optional[SyncResult] = None,
+        snippet_duration: float = 3.0,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Build per-speaker, per-camera preview clips for human mapping.
+
+        Returns a JSON-serializable structure:
+
+        {
+          "speaker_00": {
+            "speaker_id": "SPEAKER_01",
+            "global_timestamp": 123.45,
+            "snippets": {
+              "cam_wide":  { "gcs_uri": "...", "local_timestamp": 120.0 },
+              "cam_host":  { "gcs_uri": "...", "local_timestamp": 121.0 }
+            }
+          },
+          ...
+        }
+        """
+        logger.info("🎬 Building manual speaker→camera snippet set...")
+        role_to_speaker_id_map = {role: speaker_id for speaker_id, role in role_mapping.items()}
+        result: Dict[str, Dict[str, Any]] = {}
+
+        for role, speaker_id in role_to_speaker_id_map.items():
+            # Pick the longest segment for this speaker
+            segments = [s for s in speaker_segments if s["speaker_id"] == speaker_id]
+            if not segments:
+                logger.warning(f"No segments found for {speaker_id} ({role}), skipping.")
+                continue
+
+            segments.sort(key=lambda s: (s["end"] - s["start"]), reverse=True)
+            chosen = segments[0]
+            global_mid = (chosen["start"] + chosen["end"]) / 2.0
+            logger.info(f"Preparing snippets for {role} ({speaker_id}) at global {global_mid:.2f}s")
+
+            role_entry: Dict[str, Any] = {
+                "speaker_id": speaker_id,
+                "global_timestamp": float(global_mid),
+                "snippets": {}
+            }
+
+            for camera_id, video_path in video_paths.items():
+                # Default: assume "global time == local time"
+                local_ts = global_mid
+
+                if sync_result is not None:
+                    local = sync_result.get_source_timecode(camera_id, global_mid)
+                    if local is None:
+                        logger.info(
+                            f"  ⏭️  {camera_id}: no footage at {global_mid:.2f}s, skipping snippet."
+                        )
+                        continue
+                    local_ts = local
+
+                snippet_path = self._extract_snippet(video_path, local_ts, duration=snippet_duration)
+                if not snippet_path:
+                    logger.warning(f"  ⚠️ Failed to extract snippet for {camera_id}")
+                    continue
+
+                gcs_uri = self._upload_to_gcs(snippet_path)
+                # Remove local temp file; keep the GCS blob for UI
+                try:
+                    Path(snippet_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+                if not gcs_uri:
+                    logger.warning(f"  ⚠️ Failed to upload snippet for {camera_id}")
+                    continue
+
+                role_entry["snippets"][camera_id] = {
+                    "gcs_uri": gcs_uri,
+                    "local_timestamp": float(local_ts),
+                }
+
+            if not role_entry["snippets"]:
+                logger.warning(f"No valid snippets generated for {role}, skipping.")
+                continue
+
+            result[role] = role_entry
+
+        logger.info(f"✅ Built snippet set for {len(result)} roles (episode={episode_id})")
+        return result
+
     def _upload_to_gcs(self, file_path: str) -> Optional[str]:
         bucket_name = self.settings.GCS_BUCKET_NAME
         try:

@@ -68,7 +68,17 @@ class GcsSpeakerIdentifier:
             cached = self.cache.get(cache_key, "speaker_diarization")
             if cached:
                 logger.info("✅ Using cached speaker diarization")
-                return cached['segments'], cached['role_mapping'], cached.get('transcript', []), cache_key
+
+                segments = cached['segments']
+                role_mapping = cached['role_mapping']
+                transcript = cached.get('transcript', [])
+
+                # IMPORTANT: still persist diarization to DB for THIS episode
+                EpisodeRepository.save_speaker_segments(episode_id, segments)
+                speaker_stats = self._calculate_speaker_stats(segments)
+                EpisodeRepository.save_speakers(episode_id, role_mapping, speaker_stats)
+
+                return segments, role_mapping, transcript, cache_key
         
         logger.info(f"Starting speaker identification (device: {self.device})")
         

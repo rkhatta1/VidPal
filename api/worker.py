@@ -52,3 +52,49 @@ def run_pipeline(self, episode_id, audio_url, video_urls, title, sync_options=No
     except Exception as e:
         logger.error(f"Task failed: {e}")
         raise e
+
+
+@celery_app.task(name='worker.prepare_for_mapping', bind=True)
+def prepare_for_mapping(self, episode_id, audio_url, video_urls, title, sync_options=None):
+    """
+    Phase A task for manual camera mapping.
+    """
+    logger.info(f"[MANUAL] Worker.prepare_for_mapping for episode {episode_id}")
+    try:
+        pipeline = VidPalAIPipeline()
+        result = pipeline.prepare_for_manual_mapping(
+            episode_id=episode_id,
+            audio_gcs_uri=audio_url,
+            video_gcs_uris=video_urls,
+            title=title,
+            sync_options=sync_options,
+        )
+        return result
+    except SyncError as e:
+        logger.error(f"[MANUAL] Sync error in prepare_for_mapping: {e}")
+        return {
+            "status": "failed",
+            "error": str(e),
+            "error_type": "sync_error",
+        }
+    except Exception as e:
+        logger.error(f"[MANUAL] prepare_for_mapping task failed: {e}", exc_info=True)
+        raise e
+
+
+@celery_app.task(name='worker.finish_with_mapping', bind=True)
+def finish_with_mapping(self, episode_id, role_camera_map):
+    """
+    Phase B task: finalize episode using a human-provided role_camera_map.
+    """
+    logger.info(f"[MANUAL] Worker.finish_with_mapping for episode {episode_id}")
+    try:
+        pipeline = VidPalAIPipeline()
+        result = pipeline.finalize_with_manual_mapping(
+            episode_id=episode_id,
+            role_camera_map=role_camera_map,
+        )
+        return result
+    except Exception as e:
+        logger.error(f"[MANUAL] finish_with_mapping task failed: {e}", exc_info=True)
+        raise e

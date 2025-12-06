@@ -390,3 +390,79 @@ class EpisodeRepository:
                 "common_end": sync_row['common_end'],
                 "has_full_overlap": sync_row['has_full_overlap'],
             }
+
+
+    @staticmethod
+    def get_video_files(episode_id: str) -> List[Dict[str, Any]]:
+        """Return list of video files (camera_id + file_path) for an episode."""
+        with db.get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT camera_id, file_path, duration_seconds, width, height, fps, metadata
+                FROM video_files
+                WHERE episode_id = %s
+                ORDER BY camera_id
+                """,
+                (episode_id,)
+            )
+            return cursor.fetchall()
+
+    @staticmethod
+    def get_speaker_segments(episode_id: str) -> List[Dict[str, Any]]:
+        """
+        Load diarization segments for an episode from the DB and
+        normalize them to the shape expected by the EDL generator:
+        {
+            "speaker_id": str,
+            "start": float,
+            "end": float,
+            "text": str,
+            "confidence": float | None,
+        }
+        """
+        with db.get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT speaker_id, start_time, end_time, text, confidence
+                FROM speaker_segments
+                WHERE episode_id = %s
+                ORDER BY start_time
+                """,
+                (episode_id,),
+            )
+            rows = cursor.fetchall()
+
+        segments: List[Dict[str, Any]] = []
+        for row in rows:
+            segments.append(
+                {
+                    "speaker_id": row["speaker_id"],
+                    "start": float(row["start_time"]),
+                    "end": float(row["end_time"]),
+                    "text": row.get("text") or "",
+                    "confidence": (
+                        float(row["confidence"])
+                        if row.get("confidence") is not None
+                        else None
+                    ),
+                }
+            )
+        return segments
+
+    @staticmethod
+    def get_role_mapping(episode_id: str) -> Dict[str, str]:
+        """
+        Reconstruct speaker_id -> role mapping from the speakers table.
+        """
+        with db.get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT speaker_id, role
+                FROM speakers
+                WHERE episode_id = %s
+                """,
+                (episode_id,)
+            )
+            rows = cursor.fetchall()
+
+        return {row["speaker_id"]: row["role"] for row in rows if row["role"]}
