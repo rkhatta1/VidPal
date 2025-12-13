@@ -436,21 +436,34 @@ class PremiereXMLGenerator:
         s_char_a.append(self._create_text_elem('depth', "16"))
         s_char_a.append(self._create_text_elem('samplerate', "48000"))
         
-        # --- Determine audio source (Option B logic) ---
+        # --- Determine audio source ---
         audio_source_path: Optional[Path] = None
         audio_file_id: Optional[str] = None
         audio_master_clip_id: Optional[str] = None
-        audio_in_frames = 0
-        audio_out_frames = total_duration_frames
+        
+        # Identity which sync offset key to use
+        audio_cam_id: Optional[str] = None
 
         if master_audio_path is not None:
-            # Separate master audio file exists
+            # Separate master audio OR derived audio passed explicitly
             audio_source_path = master_audio_path
             audio_file_id = self._get_file_id(master_audio_path)
             audio_master_clip_id = self._get_master_clip_id(master_audio_path)
+            
+            # ATTEMPT TO MATCH master_audio_path to a camera ID in video_paths
+            # This handles the case where master_audio_path IS a video file
+            for cid, vpath in video_paths.items():
+                if vpath.resolve() == master_audio_path.resolve():
+                    audio_cam_id = cid
+                    break
+            
+            # If not found in cameras, check if "master_audio" key exists in sync_result
+            # (only if user uploaded a separate audio file)
+            if not audio_cam_id and sync_result and sync_result.get_offset("master_audio"):
+                audio_cam_id = "master_audio"
+
         else:
-            # Use a video's audio instead
-            audio_cam_id: Optional[str] = None
+            # Fallback if no master audio path provided (though pipeline usually provides one)
             if sync_result and sync_result.master_file_id in video_paths:
                 audio_cam_id = sync_result.master_file_id
             elif "cam_wide" in video_paths:
@@ -463,29 +476,32 @@ class PremiereXMLGenerator:
                 audio_file_id = self._get_file_id(audio_source_path)
                 audio_master_clip_id = self._get_master_clip_id(audio_source_path)
 
-                if sync_result and cuts:
-                    offset = sync_result.get_offset(audio_cam_id)
-                    if offset:
-                        local_in_sec = min_start - offset.global_in_point
-                        if local_in_sec < 0:
-                            logger.warning(
-                                f"Audio local_in_sec < 0 ({local_in_sec:.3f}s) "
-                                f"for {audio_cam_id}; clamping to 0."
-                            )
-                            local_in_sec = 0.0
-                        audio_in_frames = int(round(local_in_sec * self.fps))
-                        audio_out_frames = audio_in_frames + total_duration_frames
-                    else:
-                        audio_in_frames = 0
-                        audio_out_frames = total_duration_frames
-                else:
-                    audio_in_frames = 0
-                    audio_out_frames = total_duration_frames
+        # Calculate In/Out frames based on sync offset
+        audio_in_frames = 0
+        audio_out_frames = total_duration_frames
 
+        if audio_cam_id and sync_result:
+            offset = sync_result.get_offset(audio_cam_id)
+            if offset:
+                # Sync calculation:
+                # Timeline 0 corresponds to Global `min_start`.
+                # File starts at Global `global_in_point`.
+                # We need source In point relative to file start.
+                # source_in = (Timeline_Time + min_start) - global_in_point
+                # at Timeline_Time = 0: source_in = min_start - global_in_point
+                
+                local_in_sec = min_start - offset.global_in_point
+                if local_in_sec < 0:
+                     logger.warning(
+                        f"Audio local_in_sec < 0 ({local_in_sec:.3f}s) "
+                        f"for {audio_cam_id}; clamping to 0."
+                    )
+                     local_in_sec = 0.0
+                
+                audio_in_frames = int(round(local_in_sec * self.fps))
+                audio_out_frames = audio_in_frames + total_duration_frames
+        
         has_audio_source = audio_source_path is not None
-
-        if audio_out_frames <= audio_in_frames:
-            audio_out_frames = audio_in_frames + max(1, total_duration_frames)
 
         # 2 mono tracks (A1/A2) using the same source
         for i in range(1, 3):
